@@ -95,6 +95,12 @@ mark_ai: Rgb = (color.Theme{}).mark_ai,
 /// File and folder names in job windows: outlined on hover, double-click
 /// opens, hold and drag drags the file out.
 file_opener: bool = true,
+/// Folder names in output that has no colors of its own: drawn in the
+/// focus blue.
+color_folders: bool = true,
+/// After a file action done in gtty: run the shell's last listing
+/// command again.
+refresh_ls: bool = true,
 /// The last shell window closed or exited (and no other job running):
 /// gtty quits instead of opening a new shell.
 quit_on_last_shell: bool = true,
@@ -257,6 +263,10 @@ pub fn parseLine(cfg: *Config, line_in: []const u8) void {
     } else if (std.mem.eql(u8, key, "file-opener") or std.mem.eql(u8, key, "sub.file-opener")) {
         // sub.file-opener: its name from when it was a subscriber.
         if (parseBool(val)) |b| cfg.file_opener = b;
+    } else if (std.mem.eql(u8, key, "refresh-ls")) {
+        if (parseBool(val)) |b| cfg.refresh_ls = b;
+    } else if (std.mem.eql(u8, key, "color-folders")) {
+        if (parseBool(val)) |b| cfg.color_folders = b;
     } else if (std.mem.eql(u8, key, "quit-on-last-shell")) {
         if (parseBool(val)) |b| cfg.quit_on_last_shell = b;
     } else {
@@ -290,6 +300,8 @@ pub fn format(cfg: *const Config, w: *std.Io.Writer) !void {
     try w.print("colors = {s}\n", .{if (cfg.colors) "on" else "off"});
     try w.print("marks = {s}\n", .{if (cfg.marks) "on" else "off"});
     try w.print("file-opener = {s}\n", .{if (cfg.file_opener) "on" else "off"});
+    try w.print("color-folders = {s}\n", .{if (cfg.color_folders) "on" else "off"});
+    try w.print("refresh-ls = {s}\n", .{if (cfg.refresh_ls) "on" else "off"});
     try w.print("quit-on-last-shell = {s}\n\n", .{if (cfg.quit_on_last_shell) "on" else "off"});
     for (color_keys, 0..) |k, i| {
         const rgb = cfg.colorAt(i);

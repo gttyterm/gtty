@@ -16,6 +16,10 @@
 //!     click opens the right-click menu again there), on any key (Esc only
 //!     closes), the wheel, or a resize.
 //!
+//! The right-click menu on an outlined file or folder name (or on a
+//! ⌘-click selection of them) is the file actions menu (`files`): Open,
+//! Rename, Copy, Cut, Paste, Move to Trash, Delete.
+//!
 //! App owns at most one Menu, routes the mouse to it and acts on the row
 //! picked (by its index); what the menu is for is in `purpose`.
 
@@ -59,11 +63,15 @@ pub const Purpose = union(enum) {
     /// The right-click menu's History ▸ submenu: row i types `cd` to the
     /// window's folder history entry i.
     folder_history: ids.Id,
+    /// The right-click menu on a file or folder name (window id): the
+    /// file actions (`codes[i]`: App's `file_*` codes; the files are
+    /// App's `menu_files`).
+    files: ids.Id,
 };
 
 /// The drawn menu bar's menus, left to right.
-pub const Bar = enum { gtty, edit };
-pub const bar_titles = [_][]const u8{ "gtty", "Edit" };
+pub const Bar = enum { gtty };
+pub const bar_titles = [_][]const u8{"gtty"};
 
 /// The right-click menu's rows, as `codes[i]` (a row's place depends on
 /// which rows the menu has).
@@ -77,6 +85,9 @@ pub const edit_output = 3;
 /// New Shell: in the folder of the window clicked (the prompt: of the
 /// current window).
 pub const edit_new_shell = 4;
+/// Paste files into X (job windows, files on gtty's file clipboard): the
+/// file menu's Paste, into the window's folder.
+pub const edit_paste_files = 5;
 
 /// New Shell's key (a new tab in other terminals): ⌘T on macOS,
 /// Ctrl+Shift+T elsewhere (as GNOME Terminal; Ctrl+T alone is the job's:
@@ -116,18 +127,19 @@ codes: [max_rows]i32 = undefined,
 /// windows: "Copy last output" / "Copy all output"). `folders`: a History ▸
 /// row (job windows), enabled when the window has a folder history. Each
 /// row's `codes[i]` says which it is (`edit_copy`, …).
-pub fn edit(target: Target, at: [2]f32, copy_ok: bool, output: ?[]const u8, paste_ok: bool, history_ok: bool, folders: ?bool) Menu {
+pub fn edit(target: Target, at: [2]f32, copy_ok: bool, output: ?[]const u8, paste_ok: bool, history_ok: bool, folders: ?bool, paste_files: ?[]const u8) Menu {
     var m: Menu = .{ .purpose = .{ .edit = target }, .at = at };
     m.addCode(.{ .label = "Copy", .key = edit_keys[0], .enabled = copy_ok }, edit_copy);
     if (output) |label| m.addCode(.{ .label = label }, edit_output);
     m.addCode(.{ .label = "Paste", .key = edit_keys[1], .enabled = paste_ok, .sub = true, .sub_on = history_ok }, edit_paste);
+    if (paste_files) |label| m.addCode(.{ .label = label, .key = edit_keys[1] }, edit_paste_files);
     if (folders) |on| m.addCode(.{ .label = "History", .enabled = on, .sub = true, .sub_on = on }, edit_folders);
     m.addCode(.{ .label = "New Shell", .key = new_shell_key }, edit_new_shell);
     return m;
 }
 
 /// Add a row with its code.
-fn addCode(m: *Menu, row: Row, code: i32) void {
+pub fn addCode(m: *Menu, row: Row, code: i32) void {
     const n = m.n;
     m.add(row);
     if (m.n > n) m.codes[n] = code;
@@ -335,7 +347,7 @@ test "layout keeps the menu on screen" {
     var f: Gfx.Face = undefined;
     f.cell_w = 8;
     f.cell_h = 16;
-    var m = Menu.edit(.prompt, .{ 790, 590 }, false, null, true, true, null);
+    var m = Menu.edit(.prompt, .{ 790, 590 }, false, null, true, true, null, null);
     const screen: Rect = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
     m.layout(&f, 1, screen);
     try std.testing.expect(m.r.x + m.r.w <= 800 and m.r.y + m.r.h <= 600);
@@ -363,7 +375,7 @@ test "Paste's ▸ box opens the submenu, the rest of the row pastes" {
     var f: Gfx.Face = undefined;
     f.cell_w = 8;
     f.cell_h = 16;
-    var m = Menu.edit(.prompt, .{ 10, 10 }, true, null, true, true, null);
+    var m = Menu.edit(.prompt, .{ 10, 10 }, true, null, true, true, null, null);
     m.layout(&f, 1, .{ .x = 0, .y = 0, .w = 800, .h = 600 });
     const a = m.arrow_r[edit_paste];
     try std.testing.expectEqual(@as(usize, edit_paste), m.arrowAt(a.x + 1, a.y + 1).?);
@@ -375,7 +387,7 @@ test "Paste's ▸ box opens the submenu, the rest of the row pastes" {
 }
 
 test "the right-click menu of a job window: Copy last output under Copy" {
-    const m = Menu.edit(.{ .job = 7 }, .{ 10, 10 }, false, "Copy last output", true, false, false);
+    const m = Menu.edit(.{ .job = 7 }, .{ 10, 10 }, false, "Copy last output", true, false, false, null);
     try std.testing.expectEqual(@as(usize, 5), m.n);
     try std.testing.expectEqualStrings("Copy last output", m.rows[1].label);
     try std.testing.expectEqual(@as(i32, edit_output), m.codes[1]);

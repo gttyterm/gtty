@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# File actions: F2 + Esc and Backspace + Esc change nothing; ⌘⌫ moves to
+# the trash. Run in a scratch folder:
+#   mkdir w2 && cd w2 && touch b.txt gtty-trash-test-a.txt
+#   gtty --script $REPO/test/fileactions-2.gt
+# Expect: w2 has only b.txt (the other file is in the Trash).
+/s bash
+/wait 1500
+/type clear
+/wait 500
+/type LC_ALL=C ls -1
+/wait 800
+# b.txt: rename, Esc
+/move 30 84
+/wait 300
+/key f2
+/wait 300
+/text zzz
+/key escape
+/wait 300
+# b.txt: delete, Esc
+/move 30 84
+/wait 300
+/key backspace
+/wait 300
+/key escape
+/wait 300
+/shot ../h1-cancelled.bmp
+# the other file: to the trash
+/move 50 102
+/wait 300
+/key cmd+backspace
+/wait 500
+/shot ../h2-trashed.bmp
+/quit

@@ -50,13 +50,24 @@ pub const Color = struct {
     tag: Tag = .default,
     v: [3]u8 = .{ 0, 0, 0 },
 
-    pub const Tag = enum(u8) { default, indexed, rgb };
+    /// `folder`: a folder name gtty found in plain output (no colors
+    /// there): drawn in the theme's focus blue; `link_file` /
+    /// `link_folder`: a symbolic link to a file (the text color) or a
+    /// folder (the blue), with a dash of pink (`Theme.link`).
+    pub const Tag = enum(u8) { default, indexed, rgb, folder, link_file, link_folder };
 
     pub fn indexed(i: u8) Color {
         return .{ .tag = .indexed, .v = .{ i, 0, 0 } };
     }
     pub fn rgb(r: u8, g: u8, b: u8) Color {
         return .{ .tag = .rgb, .v = .{ r, g, b } };
+    }
+    pub fn folder() Color {
+        return .{ .tag = .folder };
+    }
+    /// One of gtty's name colors (`folder`, `link_file`, `link_folder`).
+    pub fn isName(c: Color) bool {
+        return c.tag == .folder or c.tag == .link_file or c.tag == .link_folder;
     }
     pub fn eql(a: Color, b: Color) bool {
         return a.tag == b.tag and std.mem.eql(u8, &a.v, &b.v);
@@ -98,9 +109,13 @@ pub const Theme = struct {
     /// Sync typing: the frame of a read-only window that gets the source
     /// window's typing (purple-red).
     sync: Rgb = Rgb.hex(0xd0459a),
+    /// The pink mixed into symbolic link names (`link_tint` of it).
+    link: Rgb = Rgb.hex(0xff5fc8),
 
     /// Minimum WCAG-style contrast ratio between text and its background.
     min_contrast: f32 = 3.0,
+
+    const link_tint = 0.35;
 
     pub fn resolve(t: *const Theme, c: Color, is_fg: bool) Rgb {
         return t.resolveBold(c, is_fg, false);
@@ -114,6 +129,9 @@ pub const Theme = struct {
             .default => if (is_fg) t.fg else t.bg,
             .rgb => .{ .r = c.v[0], .g = c.v[1], .b = c.v[2] },
             .indexed => t.index(c.v[0]),
+            .folder => if (is_fg) t.focus else t.bg,
+            .link_file => if (is_fg) t.fg.mix(t.link, link_tint) else t.bg,
+            .link_folder => if (is_fg) t.focus.mix(t.link, link_tint) else t.bg,
         };
     }
 

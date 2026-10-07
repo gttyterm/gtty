@@ -4,7 +4,8 @@
 // macOS: gtty's menus in the menu bar SDL creates (gtty app menu with
 // About / Preferences… / Services / Hide / Quit, then Window). SDL's
 // "Preferences…" row (⌘,, no action) becomes "Settings…" with New Window
-// (⌘N), New Shell (⌘T), Run Command and Sync Typing under it; an Edit menu goes between the app menu and Window.
+// (⌘N), New Shell (⌘T), Run Command and Sync Typing under it. No Edit
+// menu (see gtty_menu.h).
 #import <Cocoa/Cocoa.h>
 #include <SDL3/SDL.h>
 #include "gtty_menu.h"
@@ -89,12 +90,6 @@ bool gtty_menu_install(uint32_t event_type, gtty_menu_enabled_fn enabled, gtty_m
         [app insertItem:item(@"Run Command", GTTY_MENU_RUN, @"") atIndex:at + 3];
         [app insertItem:item(@"Sync Typing", GTTY_MENU_SYNC_TYPING, @"") atIndex:at + 4];
 
-        // Edit, after the app menu.
-        NSMenu *edit = topMenu(bar, @"Edit", 1);
-        [edit addItem:item(@"Copy", GTTY_MENU_COPY, @"c")];
-        [edit addItem:item(@"Paste", GTTY_MENU_PASTE, @"v")];
-        [edit addItem:[NSMenuItem separatorItem]];
-        [edit addItem:item(@"Select All", GTTY_MENU_SELECT_ALL, @"a")];
         return true;
     }
 }

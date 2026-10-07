@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# File actions: copy / cut + paste onto a folder name (asks, Enter), ⌘-click
+# two names + Backspace (asks, Enter deletes). Run in a scratch folder:
+#   mkdir -p w/sub && cd w && touch 'My File.txt' keep.txt notes.txt
+#   gtty --script $REPO/test/fileactions.gt
+# Expect: w has only sub; w/sub has notes.txt and 'notes 2.txt'. Shots go
+# to the folder above. Rename / Esc / trash: test/fileactions-2.gt.
+/s bash
+/wait 1500
+/type clear
+/wait 500
+/type LC_ALL=C ls -1
+/wait 800
+# copy notes.txt, paste on sub
+/move 50 120
+/wait 300
+/key cmd+c
+/wait 300
+/shot ../g1-copied.bmp
+/move 30 138
+/wait 300
+/key cmd+v
+/wait 300
+/shot ../g2-ask.bmp
+/key enter
+/wait 1500
+# cut notes.txt, paste on sub: moved as "notes 2.txt"
+/move 50 120
+/wait 300
+/key cmd+x
+/wait 300
+/move 30 138
+/wait 300
+/key cmd+v
+/wait 300
+/key enter
+/wait 1500
+# cmd-click two files, Backspace: asks; Enter deletes
+/mods cmd
+/click 50 84
+/click 50 102
+/mods none
+/wait 300
+/shot ../g3-selected.bmp
+/move 50 102
+/wait 300
+/key backspace
+/wait 300
+/shot ../g4-delete-ask.bmp
+/key enter
+/wait 1500
+/shot ../g5-deleted.bmp
+/quit

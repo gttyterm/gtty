@@ -180,6 +180,23 @@ lf_end: u64 = 0,
 out_rows: ?struct { start: usize, end: ?usize } = null,
 typed_row: ?usize = null,
 lf_row: usize = 0,
+/// The output set a color (SGR fg / bg, not a reset): since the last
+/// C mark (shells with marks), else since the start. `done_colored`:
+/// that, for the command that just ended (copied at its D, before the
+/// prompt's own colors), and `done_seq` counts those ends.
+colored: bool = false,
+done_colored: bool = false,
+done_seq: u32 = 0,
+/// Where the input line starts (the cursor at the B mark), and the
+/// command line read back from it at the C mark (`last_cmd`, the cells
+/// typed there; `cmd_seq` counts them).
+cmd_start: ?Pos = null,
+last_cmd_buf: [1024]u8 = undefined,
+last_cmd_len: usize = 0,
+cmd_seq: u32 = 0,
+/// The exit status the D mark gave for the command that just ended
+/// (null: none given).
+done_status: ?u8 = null,
 /// The program asked for bracketed paste (DEC private mode 2004, as zsh,
 /// bash and vim do): a paste is sent wrapped in ESC[200~ … ESC[201~ so it
 /// is taken as text, not typed keys (no line runs on its newline).
@@ -412,11 +429,16 @@ fn oscEnd(s: *Screen) void {
     s.has_marks = true;
     switch (p[4]) {
         'A' => s.zone = .none,
-        'B' => s.zone = .input,
+        'B' => {
+            s.zone = .input;
+            s.cmd_start = .{ .row = s.cur_row, .col = s.cur_col };
+        },
         'C' => {
+            s.readCommand();
             if (s.ai == .armed) s.ai = .running;
             s.last_output = .{ .start = s.fed + 1 };
             s.out_rows = .{ .start = s.cur_row + @intFromBool(s.cur_col > 0), .end = null };
+            s.colored = false;
             s.at_prompt = false;
             s.zone = .output;
         },
@@ -429,6 +451,9 @@ fn oscEnd(s: *Screen) void {
             };
             if (s.out_rows) |*r| if (r.end == null) {
                 r.end = @max(s.cur_row + @intFromBool(s.cur_col > 0), r.start);
+                s.done_colored = s.colored;
+                s.done_status = if (p.len > 6) std.fmt.parseInt(u8, p[6..], 10) catch null else null;
+                s.done_seq +%= 1;
             };
         },
         else => {},
@@ -608,12 +633,12 @@ fn sgr(s: *Screen) void {
             23 => s.pen.attrs.italic = false,
             24 => s.pen.attrs.underline = false,
             27 => s.pen.attrs.inverse = false,
-            30...37 => s.pen.fg = Color.indexed(@intCast(p - 30)),
+            30...37 => s.setFg(Color.indexed(@intCast(p - 30))),
             39 => s.pen.fg = .{},
-            40...47 => s.pen.bg = Color.indexed(@intCast(p - 40)),
+            40...47 => s.setBg(Color.indexed(@intCast(p - 40))),
             49 => s.pen.bg = .{},
-            90...97 => s.pen.fg = Color.indexed(@intCast(p - 90 + 8)),
-            100...107 => s.pen.bg = Color.indexed(@intCast(p - 100 + 8)),
+            90...97 => s.setFg(Color.indexed(@intCast(p - 90 + 8))),
+            100...107 => s.setBg(Color.indexed(@intCast(p - 100 + 8))),
             38, 48 => {
                 var c: Color = .{};
                 if (i + 1 < s.nparams and s.params[i + 1] == 5 and i + 2 < s.nparams) {
@@ -627,11 +652,190 @@ fn sgr(s: *Screen) void {
                     );
                     i += 4;
                 } else break;
-                if (p == 38) s.pen.fg = c else s.pen.bg = c;
+                if (p == 38) s.setFg(c) else s.setBg(c);
             },
             else => {},
         }
     }
+}
+
+/// The C mark: the command line typed since the B mark (input cells only;
+/// wrapped rows joined, others with a line feed) into `last_cmd`.
+fn readCommand(s: *Screen) void {
+    const st = s.cmd_start orelse return;
+    s.cmd_start = null;
+    var n: usize = 0;
+    var row = st.row;
+    while (row <= s.cur_row and row < s.lines.items.len) : (row += 1) {
+        const l = s.lines.items[row].items;
+        var col: usize = if (row == st.row) st.col else 0;
+        while (col < l.len) : (col += 1) {
+            const cell = l[col];
+            if (cell.attrs.zone != .input or cell.cp == 0) continue;
+            n += std.unicode.utf8Encode(cell.cp, s.last_cmd_buf[n..][0..@min(4, s.last_cmd_buf.len - n)]) catch break;
+        }
+        if (!s.isWrapped(row) and row < s.cur_row and n < s.last_cmd_buf.len) {
+            s.last_cmd_buf[n] = '\n';
+            n += 1;
+        }
+    }
+    s.last_cmd_len = std.mem.trimEnd(u8, s.last_cmd_buf[0..n], " \n").len;
+    s.cmd_seq +%= 1;
+}
+
+/// The command line the shell got last (C mark).
+pub fn lastCommand(s: *const Screen) []const u8 {
+    return std.mem.trim(u8, s.last_cmd_buf[0..s.last_cmd_len], " ");
+}
+
+/// At the prompt with something typed on the input line already.
+pub fn inputPending(s: *const Screen) bool {
+    if (!s.at_prompt) return false;
+    const st = s.cmd_start orelse return false;
+    var row = st.row;
+    while (row <= s.cur_row and row < s.lines.items.len) : (row += 1) {
+        const l = s.lines.items[row].items;
+        var col: usize = if (row == st.row) st.col else 0;
+        while (col < l.len) : (col += 1) {
+            if (l[col].attrs.zone == .input and l[col].cp != ' ' and l[col].cp != 0) return true;
+        }
+    }
+    return false;
+}
+
+/// A color set by the program (`colored`).
+fn setFg(s: *Screen, c: Color) void {
+    s.pen.fg = c;
+    s.colored = true;
+}
+
+fn setBg(s: *Screen, c: Color) void {
+    s.pen.bg = c;
+    s.colored = true;
+}
+
+/// Rows and lookups `markFolders` does at most (a huge output stays fast).
+const folder_rows_max = 3000;
+const folder_checks_max = 4000;
+
+/// What `markNames` colors.
+pub const NameKind = enum { none, folder, link_file, link_folder };
+
+/// Folder and link names in plain output: on rows [start, end) (wrapped
+/// rows joined), every word, or run of up to 4 words joined by single
+/// spaces, that `ctx.kind(name)` says is a folder or a symbolic link
+/// (longest first; a trailing `:`, `,` or `@` (ls -F) left out) gets its
+/// color (`Color.folder()`, `.link_file`, `.link_folder`) where the text
+/// has no color of its own; only output cells (zone `.output`).
+/// `ctx.found(kind, range, name)` hears of each. True when any cell
+/// changed.
+pub fn markNames(s: *Screen, start: usize, end: usize, ctx: anytype) bool {
+    const stop = @min(end, s.lines.items.len);
+    var row = if (stop > folder_rows_max) @max(start, stop - folder_rows_max) else start;
+    // A logical line's cells: where each one is.
+    var at: [1024]struct { row: usize, col: usize } = undefined;
+    var checks: usize = 0;
+    var changed = false;
+    while (row < stop) {
+        var n: usize = 0;
+        while (row < stop) : (row += 1) {
+            for (s.lines.items[row].items, 0..) |_, col| {
+                if (n == at.len) break;
+                at[n] = .{ .row = row, .col = col };
+                n += 1;
+            }
+            if (!s.isWrapped(row)) {
+                row += 1;
+                break;
+            }
+        }
+        // Words: [a, b) in `at`.
+        var words: [128][2]usize = undefined;
+        var nw: usize = 0;
+        var k: usize = 0;
+        while (k < n and nw < words.len) {
+            while (k < n and s.cellAt(at[k].row, at[k].col).cp == ' ') k += 1;
+            if (k == n) break;
+            const a = k;
+            while (k < n and s.cellAt(at[k].row, at[k].col).cp != ' ') k += 1;
+            words[nw] = .{ a, k };
+            nw += 1;
+        }
+        var wi: usize = 0;
+        while (wi < nw) {
+            var took: usize = 1;
+            var j: usize = @min(nw - wi, 4);
+            found: while (j > 0) : (j -= 1) {
+                const last = wi + j - 1;
+                // Joined by single spaces only.
+                for (wi..last) |x| if (words[x + 1][0] != words[x][1] + 1) continue :found;
+                const a = words[wi][0];
+                var b = words[last][1];
+                var name: [file_name_max]u8 = undefined;
+                var trims: usize = 0;
+                while (trims < 2) : (trims += 1) {
+                    if (checks >= folder_checks_max) return changed;
+                    const len = s.cellsText(at[a..b], &name) orelse break;
+                    if (len == 0) break;
+                    checks += 1;
+                    const kind = ctx.kind(name[0..len]);
+                    if (kind != .none) {
+                        const col: Color = .{ .tag = switch (kind) {
+                            .folder => .folder,
+                            .link_file => .link_file,
+                            else => .link_folder,
+                        } };
+                        for (at[a..b]) |p| {
+                            const cell = &s.lines.items[p.row].items[p.col];
+                            if (cell.fg.tag != .default or cell.attrs.zone != .output) continue;
+                            cell.fg = col;
+                            changed = true;
+                        }
+                        const p0 = s.textPos(at[a].row, @intCast(at[a].col));
+                        const p1 = s.textPos(at[b - 1].row, @intCast(at[b - 1].col));
+                        if (p0 != null and p1 != null) {
+                            ctx.found(kind, .{ .start = p0.?, .end = .{ .line = p1.?.line, .col = p1.?.col + 1 } }, name[0..len]);
+                        }
+                        took = j;
+                        break :found;
+                    }
+                    const lc = s.cellAt(at[b - 1].row, at[b - 1].col).cp;
+                    if (b - a < 2 or (lc != ':' and lc != ',' and lc != '@')) break;
+                    b -= 1;
+                }
+            }
+            wi += took;
+        }
+    }
+    if (changed) s.generation +%= 1;
+    return changed;
+}
+
+const file_name_max = 1024;
+
+/// Take `markNames`' colors off every cell (the setting turned off).
+pub fn clearNames(s: *Screen) void {
+    for (s.lines.items) |l| for (l.items) |*cell| {
+        if (cell.fg.isName()) cell.fg = .{};
+    };
+    s.generation +%= 1;
+}
+
+fn cellAt(s: *const Screen, row: usize, col: usize) Cell {
+    return s.lines.items[row].items[col];
+}
+
+/// The cells' text as UTF-8 in `buf` (spacers and pads left out); null
+/// when it doesn't fit.
+fn cellsText(s: *const Screen, cells: anytype, buf: []u8) ?usize {
+    var n: usize = 0;
+    for (cells) |p| {
+        const cell = s.cellAt(p.row, p.col);
+        if (cell.cp == 0) continue;
+        n += std.unicode.utf8Encode(cell.cp, buf[n..][0..@min(4, buf.len - n)]) catch return null;
+        if (cell.extra != 0) n += std.unicode.utf8Encode(cell.extra, buf[n..][0..@min(4, buf.len - n)]) catch return null;
+    }
+    return n;
 }
 
 // ---------------------------------------------------------------- editing
@@ -1193,6 +1397,7 @@ fn sgrColor(buf: []u8, c: Color, base: u8) ![]const u8 {
         .default => "",
         .indexed => try std.fmt.bufPrint(buf, ";{d};5;{d}", .{ base, c.v[0] }),
         .rgb => try std.fmt.bufPrint(buf, ";{d};2;{d};{d};{d}", .{ base, c.v[0], c.v[1], c.v[2] }),
+        .folder, .link_file, .link_folder => "", // gtty's own marking, not the program's
     };
 }
 
@@ -1520,4 +1725,57 @@ test "copy flash rows: the last command's output, through reflow" {
     s.resize(60, 5);
     try std.testing.expectEqual(@as(usize, 4), s.out_rows.?.start);
     try std.testing.expectEqual(@as(?usize, 5), s.out_rows.?.end);
+}
+
+test "folder names in plain output" {
+    var s = Screen.init(std.testing.allocator);
+    defer s.deinit();
+    s.resize(40, 5);
+    s.feed("$ ls\r\n\x1b]133;C\x07a.txt  src  My Dir  docs:\r\n\x1b]133;D;0\x07$ ");
+    try std.testing.expect(!s.done_colored);
+    try std.testing.expectEqual(@as(u32, 1), s.done_seq);
+    const Dirs = struct {
+        links: usize = 0,
+        pub fn kind(_: *@This(), name: []const u8) NameKind {
+            if (std.mem.eql(u8, name, "a.txt")) return .link_file;
+            for ([_][]const u8{ "src", "My Dir", "docs" }) |d| if (std.mem.eql(u8, d, name)) return .folder;
+            return .none;
+        }
+        pub fn found(d: *@This(), k: NameKind, range: TextRange, _: []const u8) void {
+            if (k == .link_file) {
+                d.links += 1;
+                std.testing.expectEqual(@as(u32, 0), range.start.col) catch unreachable;
+                std.testing.expectEqual(@as(u32, 5), range.end.col) catch unreachable;
+            }
+        }
+    };
+    var dirs: Dirs = .{};
+    const r = s.out_rows.?;
+    try std.testing.expect(s.markNames(r.start, r.end.?, &dirs));
+    try std.testing.expectEqual(@as(usize, 1), dirs.links);
+    const l = s.lines.items[r.start].items;
+    try std.testing.expectEqual(Color.Tag.link_file, l[0].fg.tag); // a.txt
+    try std.testing.expectEqual(Color.Tag.folder, l[7].fg.tag); // src
+    try std.testing.expectEqual(Color.Tag.folder, l[12].fg.tag); // My
+    try std.testing.expectEqual(Color.Tag.folder, l[15].fg.tag); // Dir
+    try std.testing.expectEqual(Color.Tag.folder, l[14].fg.tag); // the space in "My Dir"
+    try std.testing.expectEqual(Color.Tag.folder, l[22].fg.tag); // docs
+    try std.testing.expectEqual(Color.Tag.default, l[24].fg.tag); // the ":"
+    // Colored output is left alone (the window doesn't call markFolders).
+    s.feed("ls\r\n\x1b]133;C\x07\x1b[34msrc\x1b[0m\r\n\x1b]133;D;0\x07\x1b[32m$\x1b[0m ");
+    try std.testing.expect(s.done_colored);
+}
+
+test "the command line, read back at C" {
+    var s = Screen.init(std.testing.allocator);
+    defer s.deinit();
+    s.resize(40, 5);
+    s.feed("\x1b]133;D;0\x07$ \x1b]133;B\x07"); // the first prompt
+    try std.testing.expect(!s.inputPending());
+    s.feed("ls -l");
+    try std.testing.expect(s.inputPending());
+    s.feed("\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07$ \x1b]133;B\x07");
+    try std.testing.expectEqualStrings("ls -l", s.lastCommand());
+    try std.testing.expectEqual(@as(u32, 1), s.cmd_seq);
+    try std.testing.expect(!s.inputPending());
 }

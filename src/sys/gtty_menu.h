@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // gtty's menus in the OS's own menu bar (macOS): the app menu "gtty"
-// (Settings…, Run Command, Sync Typing, next to About / Hide / Quit), an Edit menu
-// (Copy, Paste, Select All); the app menu also has New Window (⌘N,
-// another gtty) and New Shell (⌘T, like a new tab).
+// (Settings…, Run Command, Sync Typing, next to About / Hide / Quit); it
+// also has New Window (⌘N, another gtty) and New Shell (⌘T, like a new
+// tab). No Edit menu (removed 2026-10-07: with several job windows its
+// Copy / Paste read as "which window?"; ⌘C / ⌘V / ⌘A are plain keys in
+// gtty, acting on the window the mouse or keyboard is in).
 // Elsewhere there is no global menu bar: gtty_menu_install returns false
 // and gtty draws a bar of its own.
 //
@@ -18,9 +20,7 @@
 enum {
     GTTY_MENU_RUN = 1,        // Run Command: keyboard to the prompt
     GTTY_MENU_SETTINGS = 2,   // Settings…
-    GTTY_MENU_COPY = 3,       // Edit ▸ Copy
-    GTTY_MENU_PASTE = 4,      // Edit ▸ Paste
-    GTTY_MENU_SELECT_ALL = 5, // Edit ▸ Select All
+    // 3, 4, 5: the old Edit menu's Copy, Paste, Select All (gone).
     GTTY_MENU_NEW_SHELL = 6,  // gtty ▸ New Shell (⌘T)
     GTTY_MENU_NEW_WINDOW = 7, // gtty ▸ New Window (⌘N): another gtty
     GTTY_MENU_SYNC_TYPING = 8, // gtty ▸ Sync Typing (checked while on)

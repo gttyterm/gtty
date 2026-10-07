@@ -1,14 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! What a mouse action did to the files of a job window's folder, shown on
-//! that window long enough to be seen (a drop copies in a few ms). It looks
-//! like the title-bar copy's feedback (`JobWindow.drawCopyFlash`): a white
-//! flash over the text, then a bubble in its middle (`JobWindow.bubble`)
-//! saying what is happening ("↓ copying a.txt into src…", outlined blue);
-//! when the work ends, another flash and the result (green done, red
-//! failed, blue for a command typed, not run, gray cancelled), shown for
-//! `hold_ms`.
+//! What a file action did to the files of a job window's folder, shown on
+//! that window long enough to be seen (a drop copies in a few ms): a
+//! bubble in its middle (`JobWindow.bubble`) saying what is happening
+//! ("↓ copying a.txt into src…", outlined blue), then the result (green
+//! done, red failed), shown for `hold_ms`. No white flash: the work was
+//! asked for in a dialog, and the whole window never flashes (only the
+//! title-bar copy flashes the rows it took; actions with no dialog flash
+//! just the names, `JobWindow.flashNames`). Nothing at all when nothing
+//! was done (cancelled, refused): the status bar says so.
 //!
 //! The window owns it (`JobWindow.file_fx`, drawn in `draw`, cleared in
 //! `tick`); App starts it (`App.startFx`) and ends it (`App.finishFx`).
@@ -27,12 +28,11 @@ const Theme = color.Theme;
 
 /// How long the result stays after the work ended.
 pub const hold_ms: u64 = 1600;
-/// The white flash's fade, and when the bubble shows after it started
-/// (the copy feedback's `copy_white_ms`, `copy_bubble_ms`).
-const white_ms: u64 = 350;
+/// When the bubble shows after it started (the copy feedback's
+/// `copy_bubble_ms`).
 const bubble_ms: u64 = 150;
-/// The working state is shown at least this long, so the two flashes
-/// read as two steps.
+/// The working state is shown at least this long, so "copying…" and the
+/// result read as two steps.
 const min_work_ms: u64 = 400;
 
 pub const State = enum {
@@ -40,12 +40,8 @@ pub const State = enum {
     working,
     /// Done: green.
     ok,
-    /// Done, but nothing changed yet (a command typed, not run): blue.
-    info,
     /// Failed: red.
     failed,
-    /// Not done (the user said no, or didn't answer): gray.
-    cancelled,
 };
 
 /// Tells this one from a later one on the same window (App's `finishFx`).
@@ -99,25 +95,13 @@ pub fn label(f: *const FileFx, t: *const Theme, now: u64, buf: []u8) struct { []
     const icon: []const u8, const col = switch (state) {
         .working => .{ "↓", t.focus },
         .ok => .{ "✓", t.ok },
-        .info => .{ "→", t.focus },
         .failed => .{ "✗", t.stderr_accent },
-        .cancelled => .{ "–", t.dim },
     };
     const s = if (result) f.result.get() else f.text.get();
     return .{ std.fmt.bufPrint(buf, "{s} {s}", .{ icon, s }) catch s, col };
 }
 
-/// The white flash over `area` (the window's text): when it started and
-/// when the result came, each fading out over `white_ms`.
-pub fn drawFlash(f: *const FileFx, gfx: *Gfx, area: Rect, now: u64) void {
-    for ([_]u64{ f.start_ms, f.done_ms }) |from| {
-        if (from == 0 or now < from or now - from >= white_ms) continue;
-        const left = 1 - @as(f32, @floatFromInt(now - from)) / @as(f32, white_ms);
-        gfx.fillAlpha(area, .{ .r = 255, .g = 255, .b = 255 }, @intFromFloat(@round(110 * left)));
-    }
-}
-
-/// The bubble shows (after the first flash).
+/// The bubble shows (a moment after it started).
 pub fn bubbleShown(f: *const FileFx, now: u64) bool {
     return now -| f.start_ms >= bubble_ms;
 }

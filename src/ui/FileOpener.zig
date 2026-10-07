@@ -109,11 +109,11 @@ pub fn help(fo: *const FileOpener, buf: []u8) []const u8 {
     if (fo.mark) |*m| {
         const name = std.fs.path.basename(m.file());
         return (if (m.folder)
-            std.fmt.bufPrint(buf, "double-click: cd to {s}  ·  hold and drag: drag it out", .{name})
+            std.fmt.bufPrint(buf, "double-click: cd to {s}  ·  hold and drag: drag it out  ·  right-click: more", .{name})
         else if (m.remote)
             std.fmt.bufPrint(buf, "double-click: copy {s} here (read-only) and open it  (Shift: choose the app)", .{name})
         else
-            std.fmt.bufPrint(buf, "double-click: open {s}  (Shift: choose the app)  ·  hold and drag: drag it out", .{name})) catch "";
+            std.fmt.bufPrint(buf, "double-click: open {s}  (Shift: choose the app)  ·  hold and drag: drag it out  ·  right-click: more", .{name})) catch "";
     }
     if (!fo.over) return "";
     const dest = fo.over_dest_buf[0..fo.over_dest_len];

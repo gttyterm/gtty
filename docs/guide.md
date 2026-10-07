@@ -208,13 +208,32 @@ Linux gtty shows a thin menu bar at the top of its window:
   Ctrl+Shift+N: another gtty), **New Shell** (⌘T; Linux Ctrl+Shift+T:
   your shell in the current window's folder) and **Run
   command** (back to the prompt, ready to type).
-- **Edit** → **Copy**, **Paste**, **Select All** (⌘C ⌘V ⌘A on macOS).
+
+Copy, paste and select all are keys, not menu rows (with several job
+windows a menu's Copy didn't say which one): ⌘C, ⌘V, ⌘A (Linux
+Ctrl+Shift+C, V, A).
 
 **Settings…** opens the settings window: text size, scrollback, the
 start-up command, file names (mark on hover, double-click opens), the left-edge marks, colors (text, background and the 16 terminal colors),
 and delay times. Changes take effect at once and are saved in
 `~/.config/gtty/config` (`$XDG_CONFIG_HOME/gtty/config`). Options on the
 command line and `GTTY_*` variables still win for that run.
+
+### Folders and links in the output
+
+When a command's output has no colors of its own (plain `ls`, `find`,
+`pwd`…), gtty colors the names in it that are folders in the window's
+folder: **folders blue** (the color of a focused window's border), and
+**symbolic links** with a dash of pink: a link to a file in the normal
+text color tinted pink, a link to a folder in the blue tinted pink.
+Output with its own colors (`ls -G`, `ls --color`) is left as it is.
+Turn it off (and on) in Settings… → General → "Folder names in blue
+(output without colors)".
+
+**Hover a link** for a moment: a small box above it shows where it
+points (→ the real path). It stays a moment after the mouse leaves the
+name, so you can move onto it; **click the box** to `cd` to the folder
+the target is in (the shell must be waiting at its prompt).
 
 ### Opening files from the output
 
@@ -248,6 +267,51 @@ further away inside the session (another ssh, a container shell, `sudo
 While the mouse is on a marked name, a short hint at the bottom of gtty's
 window says what the mouse does with it. Turn it off (and on) in
 Settings… → General → "File names: mark on hover, double-click opens".
+
+### Working with files
+
+**Right-click** an outlined file or folder name for what you can do with
+it: **Open** / **Open With…** (a folder: **cd here**, **Open in
+Finder**), **Rename…**, **Copy**, **Cut**, **Paste into …**, **Move to
+Trash** (where the system has a trash) and **Delete…**.
+
+The same with keys, while the mouse is on the name (move the mouse onto
+it after typing: keys you type with the pointer just resting on a name
+still go to the shell):
+
+| | macOS | Linux |
+|---|---|---|
+| Rename | F2 | F2 |
+| Copy / Cut | ⌘C / ⌘X | Ctrl+Shift+C / X |
+| Paste (over a folder name, or anywhere in a window: its folder) | ⌘V | Ctrl+Shift+V |
+| Move to Trash | ⌘⌫ | Ctrl+Delete |
+| Delete | ⌫ or Delete | Delete or Backspace |
+
+**Several at once:** ⌘-click (Linux: Ctrl-click) names to select them
+(a box marks each; ⌘-click again to take one out, a plain click clears),
+then use a key or right-click one of them.
+
+Copied or cut files wait on gtty's own file clipboard (not the system's:
+the window menu's plain **Paste** still pastes text). While they wait,
+right-clicking anywhere in a window's text also offers **Paste … into
+…**, the folder that window's shell is in.
+
+**Rename** opens a small field over the name with the name selected up
+to its extension: type the new name (arrows, words with ⌥, Shift to
+select, Backspace…), **Enter** renames, **Esc** leaves it. **Paste** and
+**Delete** ask first (Enter: yes, Esc: no); with no answer in 10 seconds
+nothing happens. A pasted name that's already there gets a number, so
+nothing is overwritten; Delete removes for good (Move to Trash doesn't).
+After a paste, delete, rename, trash or drop, the shell runs your last
+`ls` (with its options, e.g. `ls -l`; plain `ls` if there was none) again
+so the listing shows the change, if it is waiting at its prompt with
+nothing typed. The same after a `cd` gtty types for you (a link's box,
+the folder chip, History ▸, double-clicking a folder): the new folder is
+listed. Turn it off in Settings… → General → "Run ls again after
+a file action in gtty".
+Copy, Cut and Move to Trash flash the names they took; Paste, Delete and
+Rename show their result on the window for a moment. A cancelled action
+only says so in the status bar.
 
 ### Dropping files on gtty
 

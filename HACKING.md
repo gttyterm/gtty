@@ -48,8 +48,7 @@ hooks (slash only): `/wait <ms>`, `/shot <file.bmp>`, `/type <text>` (text +
 Enter), `/text <text>` (no Enter), `/key <keys>` (e.g. `cmd+v`,
 `ctrl+shift+left`), `/click <x> <y>`, `/rclick <x> <y>`, `/dclick <x> <y>`,
 `/down <x> <y>`, `/up <x> <y>`, `/move <x> <y>`, `/drag <x1> <y1> <x2> <y2>`, `/resize <w> <h>`, `/mods cmd+shift | none`
-(modifier keys held), `/menu run | settings | copy |
-paste | select-all | new-shell | new-window | sync-typing | about` (a menu pick), `/target main | settings` (which OS window the
+(modifier keys held), `/menu run | settings | new-shell | new-window | sync-typing | about` (a menu pick), `/target main | settings` (which OS window the
 next clicks, keys and shots go to), `/quit`. For demos: `/record start
 <dir> [fps]` … `/record stop` (frames + their times, with a drawn mouse
 pointer), `/slow <text>` (typed one character at a time), `/glide <x> <y>
@@ -110,7 +109,8 @@ src/
                       options, remote scripts (pure, unit-tested)
   core/RemoteLink.zig gtty's own connection to the remote machine; Fetch
   core/Config.zig     settings file (~/.config/gtty/config): load, save
-  sys/gtty_menu.m     gtty / Edit in the macOS menu bar (gtty_menu.c: none)
+  sys/gtty_menu.m     gtty in the macOS menu bar (gtty_menu.c: none)
+  sys/gtty_trash.m    Move to Trash (NSFileManager; gtty_trash.c: gio / trash-put / kioclient)
   ui/tiling.zig       how many windows fit in the windows area, and where
   core/git.zig        current branch from .git/HEAD; git commands in the background
   ui/commands.zig     gtty command parser (`name`, `/name`)
