@@ -1,7 +1,10 @@
 # gtty — notes for Claude Code
 
-gtty is a graphical terminal written in Zig: every command gets its own
-on-screen job window (stdout and stderr together, as in a normal terminal).
+gtty ("True Graphic Virtual Terminal", the tagline) is a multi-window
+terminal written in Zig: shells and commands run in on-screen job windows
+(stdout and stderr together, as in a normal terminal), many on one screen.
+User-facing text (README, About, packages) doesn't say "job window" or
+"every command gets its own window".
 The user's own shell (zsh/bash) runs the commands; gtty is the terminal, not
 the shell. Users expect it to behave like a shell in a terminal.
 

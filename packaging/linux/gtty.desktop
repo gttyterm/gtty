@@ -2,7 +2,7 @@
 Type=Application
 Name=gtty
 GenericName=Terminal
-Comment=A graphical terminal: every command in its own window
+Comment=True Graphic Virtual Terminal: many terminal windows on one screen
 Exec=gtty
 Icon=gtty
 Terminal=false
