@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! gtty — a graphical terminal where every command gets its own window.
+//! gtty — True Graphic Virtual Terminal: a multi-window terminal.
 
 const std = @import("std");
 const c = @import("c.zig").c;

@@ -5660,7 +5660,7 @@ fn drawAbout(app: *App, f: *Gfx.Face) void {
     const Line = struct { text: []const u8, col: Rgb };
     const lines = [_]Line{
         .{ .text = "gtty " ++ @import("build_options").version, .col = t.focus },
-        .{ .text = "a terminal where every command gets its own window", .col = t.dim },
+        .{ .text = "True Graphic Virtual Terminal", .col = t.dim },
         .{ .text = "", .col = t.dim },
         .{ .text = copyright, .col = t.prompt_fg },
         .{ .text = license_line, .col = t.prompt_fg },

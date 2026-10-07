@@ -1,6 +1,9 @@
-# gtty — a terminal where every command gets its own window
+# gtty — True Graphic Virtual Terminal
 
-![Commands typed at the gtty prompt open their own windows; finished ones turn green, a failed one red, older ones move to the job grid](docs/images/hero.webp)
+A multi-window terminal: all your shells and commands on one screen, side
+by side or one click away.
+
+![Several terminal windows on one screen: finished ones turn green, a failed one red, the rest wait in the grid on the right](docs/images/hero.webp)
 
 ## Install
 
@@ -17,13 +20,14 @@
 
 ## Features
 
-### Every command in its own window
+### Many windows, one screen
 
-![Four job windows side by side; a click on a grid window brings it in](docs/images/windows.webp)
+![Four windows side by side; a click on a window in the grid brings it in](docs/images/windows.webp)
 
-Each command opens its own job window: green when it worked, red with the
-exit code when it didn't. Older windows wait in the job grid, and as many as
-fit can sit side by side.
+Open as many shells and commands as you like. As many windows as fit sit
+side by side; the rest wait in the grid on the right, one click away. A
+window turns green when its command worked, red with the exit code when it
+didn't.
 
 ### Copy a command's output in one click
 
@@ -40,13 +44,19 @@ menu.
 In zsh and bash, ⌥/Ctrl + arrows jump words, Shift selects, typing or
 pasting replaces the selection, and Backspace deletes it.
 
-### Files with the mouse
+### Manage files with your mouse
 
 ![Hovering file names outlines them; double-click opens a file or cds into a folder; a held file drags; a dropped file is copied in](docs/images/files.webp)
 
-Hover a file name in the output and it gets an outline. Double-click opens
-the file, or `cd`s into a folder. Hold and drag the file into another
-app, or drop files on a window to copy them into its folder.
+Work with the files and folders in your `ls` output the way you do in
+Finder on a Mac or in the GNOME / KDE file manager. Hover a name and it
+gets an outline:
+
+- **Double-click** opens a file in its app, or `cd`s into a folder.
+- **Right-click** for Open With…, Rename, Copy, Cut, Paste, Move to
+  Trash and Delete (with the usual shortcuts).
+- **Drag** a file into another app, or drop files on a window to copy
+  them into its folder.
 
 ### Type into several terminals at once
 

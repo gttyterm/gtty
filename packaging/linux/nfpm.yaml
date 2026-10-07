@@ -10,7 +10,8 @@ section: x11
 priority: optional
 maintainer: Sagi Forbes Nagar <feralkeep.studios@gmail.com>
 description: |
-  A graphical terminal: every command gets its own job window.
+  True Graphic Virtual Terminal: a multi-window terminal, all your shells
+  and commands on one screen.
   Your own shell (zsh / bash) runs the commands.
 homepage: https://github.com/gttyterm/gitty
 license: GPL-3.0-or-later
