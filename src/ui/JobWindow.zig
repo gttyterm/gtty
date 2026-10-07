@@ -37,6 +37,7 @@ const git = @import("../core/git.zig");
 const remote = @import("../core/remote.zig");
 const RemoteLink = @import("../core/RemoteLink.zig");
 const FileOpener = @import("FileOpener.zig");
+const FileFx = @import("FileFx.zig");
 const Rect = Gfx.Rect;
 
 const JobWindow = @This();
@@ -145,6 +146,9 @@ opener: FileOpener = .{},
 /// The title-bar copy just took rows [first, end): a white flash over
 /// them, then a "Copied" bubble in their middle (`drawCopyFlash`).
 copy_flash: ?struct { first: usize, end: usize, ms: u64 } = null,
+/// What a mouse action just did to this window's folder's files (a drop
+/// copied in, …): the same flash and bubble as the copy (`drawFileFx`).
+file_fx: ?FileFx = null,
 /// When the user last typed into a program without shell marks (its echo
 /// counts as input for a short while: `Screen.echo`).
 echo_ms: u64 = 0,
@@ -1308,6 +1312,16 @@ pub fn tip(w: *const JobWindow, h: Hit) ?struct { text: []const u8, r: Rect } {
 /// Once a frame: true when the window needs a redraw (the "↑ N" label
 /// timed out).
 pub fn tick(w: *JobWindow, gfx: *Gfx, now: u64) bool {
+    // The file effect: the same, until it is over.
+    if (w.file_fx) |*f| {
+        if (f.over(now)) w.file_fx = null;
+        _ = w.tickCopyFlash(gfx, now);
+        return true;
+    }
+    return w.tickCopyFlash(gfx, now);
+}
+
+fn tickCopyFlash(w: *JobWindow, gfx: *Gfx, now: u64) bool {
     // The copy flash: redraw every frame while it shows.
     if (w.copy_flash) |f| {
         if (now -| f.ms < copy_flash_ms) {
@@ -1493,19 +1507,43 @@ fn drawCopyFlash(w: *const JobWindow, gfx: *Gfx, theme: *const Theme) void {
     }
     if (t < copy_bubble_ms) return;
     const face = w.chromeFace(gfx) catch return;
-    const label = "✓ Copied";
+    bubble(gfx, theme, face, box, "✓ Copied", theme.ok, ui);
+}
+
+/// The feedback bubble (copy, file effects): `label` in the title-bar
+/// colors, outlined in `col`, centered in `box` (its start kept in view
+/// when it is wider).
+pub fn bubble(gfx: *Gfx, theme: *const Theme, face: *Gfx.Face, box: Rect, label: []const u8, col: Rgb, ui: f32) void {
     const pad = @round(10 * ui);
     const bw = Gfx.textWidth(face, label) + 2 * pad;
     const bh = face.cell_h + pad;
     const br: Rect = .{
-        .x = @round(box.x + (box.w - bw) / 2),
+        .x = @round(@max(box.x + (box.w - bw) / 2, box.x)),
         .y = @round(box.y + (box.h - bh) / 2),
         .w = bw,
         .h = bh,
     };
     gfx.fill(br, theme.title_bg);
-    gfx.outline(br, theme.ok, @max(@round(ui), 1));
+    gfx.outline(br, col, @max(@round(ui), 1));
     _ = gfx.text(face, br.x + pad, br.y + @round(pad / 2), label, theme.prompt_fg);
+}
+
+/// The file effect (`file_fx`): white flashes over `area` (the text
+/// area; in the grid, the cell under its title bar), the bubble (normal
+/// size) in its middle.
+fn drawFileFx(w: *const JobWindow, gfx: *Gfx, theme: *const Theme, area: Rect) void {
+    const f = if (w.file_fx) |*f| f else return;
+    if (w.anim_from != null) return;
+    const now = c.SDL_GetTicks();
+    if (f.over(now)) return;
+    gfx.clip(area);
+    defer gfx.clip(null);
+    f.drawFlash(gfx, area, now);
+    if (!f.bubbleShown(now)) return;
+    const face = w.chromeFace(gfx) catch return;
+    var buf: [256]u8 = undefined;
+    const label, const col = f.label(theme, now, &buf);
+    bubble(gfx, theme, face, w.out_r, label, col, w.scale.ui);
 }
 
 /// The file opener's outline: dashed boxes around the name (solid while
@@ -1710,6 +1748,8 @@ pub fn draw(w: *JobWindow, gfx: *Gfx, theme: *const Theme) void {
     w.drawTitle(gfx, theme, chrome);
     if (w.grid_r) |g| {
         w.drawScaledContent(gfx, theme, f, g);
+        const top = w.title_r.y + w.title_r.h;
+        w.drawFileFx(gfx, theme, .{ .x = g.x, .y = top, .w = g.w, .h = @max(g.y + g.h - top, 1) });
     } else {
         drawPane(gfx, theme, f, &w.out, w.out_r, theme.bg, w.colors, w.showCursor(), true, w.scroll_ms != 0);
         w.drawMarks(gfx, theme);
@@ -1717,6 +1757,7 @@ pub fn draw(w: *JobWindow, gfx: *Gfx, theme: *const Theme) void {
         w.drawFooter(gfx, theme);
         w.drawFileMark(gfx, theme);
         w.drawCopyFlash(gfx, theme);
+        w.drawFileFx(gfx, theme, w.out_r);
     }
     if (w.kill_menu) killMenu(gfx, chrome, w.skull_r, theme, ui);
 

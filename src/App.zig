@@ -26,6 +26,8 @@ const Menu = @import("ui/Menu.zig");
 const SettingsWindow = @import("ui/SettingsWindow.zig");
 const Config = @import("core/Config.zig");
 const FileOpener = @import("ui/FileOpener.zig");
+const FileFx = @import("ui/FileFx.zig");
+const Modal = @import("ui/Modal.zig");
 const RemoteLink = @import("core/RemoteLink.zig");
 const ids_mod = @import("ui/ids.zig");
 const oscmd = @import("core/oscmd.zig");
@@ -245,6 +247,16 @@ drag_path: ?[:0]u8 = null,
 inside_drop: ?struct { target: InsideTarget, ms: u64 } = null,
 /// Copies of dropped files running in the background (gtty_copy).
 copying: std.ArrayList(Copying) = .empty,
+/// The modal dialog that is open (one at a time), and what its answer is
+/// for (`resolveModal`).
+modal: ?Modal = null,
+modal_job: ModalJob = .none,
+/// The next `JobWindow.file_fx` id (FileFx: what a mouse action did to a
+/// window's files, shown on it for a moment).
+fx_next_id: u32 = 1,
+/// A file dragged out of gtty (`drag_path`): once the drag ends, checked
+/// for a while; gone from its folder → moved out (FileFx on its window).
+drag_out: ?struct { window: ids_mod.Id, ended_ms: u64 = 0, next_ms: u64 = 0 } = null,
 /// The window whose text the mouse is over (its file opener follows the
 /// mouse).
 hover_src: ?ids_mod.Id = null,
@@ -417,6 +429,15 @@ pub fn destroy(app: *App) void {
     app.drop_paths.deinit(app.gpa);
     if (app.drag_path) |p| app.gpa.free(p);
     app.copying.deinit(app.gpa); // copies still running finish on their own
+    @import("ui/DirCache.zig").deinit();
+    switch (app.modal_job) {
+        .none => {},
+        .copy_drop => |d| {
+            for (d.paths) |p| app.gpa.free(p);
+            app.gpa.free(d.paths);
+            app.gpa.free(d.dest);
+        },
+    }
     app.prompt.deinit();
     if (app.startup) |s| app.gpa.free(s);
     for (app.script.items) |l| app.gpa.free(l);
@@ -491,6 +512,8 @@ pub fn run(app: *App) void {
         app.tickInsideDrop();
         app.tickFilePress();
         app.tickCopies();
+        app.tickDragOut();
+        app.tickModal();
         app.tickPeek();
         app.updateSync();
         if (app.reject_until != 0 and c.SDL_GetTicks() > app.reject_until) {
@@ -3134,6 +3157,7 @@ fn eventWindow(ev: *const c.SDL_Event) c.SDL_WindowID {
 
 /// Typed text goes to the focused running window, otherwise to the prompt.
 fn onText(app: *App, text: []const u8) void {
+    if (app.modal != null) return;
     if (app.peek) |*pk| if (pk.wantsKeys()) {
         pk.text(text);
         app.layoutPeek();
@@ -3158,6 +3182,19 @@ fn onKey(app: *App, key: c.SDL_Keycode, mod: c.SDL_Keymod) void {
     // Any key closes the About box, and does nothing else.
     if (app.about_visible) {
         app.about_visible = false;
+        return;
+    }
+    // A modal takes every key (Enter, Esc, ←/→/Tab; the rest does nothing).
+    if (app.modal) |*m| {
+        const pick = m.key(switch (key) {
+            c.SDLK_RETURN, c.SDLK_KP_ENTER => .enter,
+            c.SDLK_ESCAPE => .escape,
+            c.SDLK_LEFT => .left,
+            c.SDLK_RIGHT => .right,
+            c.SDLK_TAB => .tab,
+            else => .other,
+        });
+        if (pick) |p| app.resolveModal(p, .picked);
         return;
     }
     // Esc cancels a remote copy in progress (its modal is up).
@@ -3349,6 +3386,12 @@ fn jobKeyBytes(key: c.SDL_Keycode, ctrl: bool, shift: bool) ?[]const u8 {
 
 fn onClick(app: *App, x: f32, y: f32, button: u8, clicks: u8) void {
     app.hideTip();
+    // A modal: a left click on one of its buttons picks it; nothing else
+    // does anything.
+    if (app.modal) |*m| {
+        if (button == c.SDL_BUTTON_LEFT) if (m.click(x, y)) |p| app.resolveModal(p, .picked);
+        return;
+    }
     // Any click closes the About box, and does nothing else.
     if (app.about_visible) {
         app.about_visible = false;
@@ -3697,7 +3740,7 @@ fn dragFile(app: *App, w: *JobWindow) void {
     app.drag_path = app.gpa.dupeZ(u8, p) catch null;
     app.inside_drop = null;
     const one = [_][*c]const u8{p.ptr};
-    _ = c.gtty_drag_files(app.window, &one, 1);
+    if (c.gtty_drag_files(app.window, &one, 1)) app.drag_out = .{ .window = w.uid };
 }
 
 // ------------------------------------------------------------ drop
@@ -3757,8 +3800,9 @@ fn onDrop(app: *App, ev: *const c.SDL_Event) void {
                 .remote => {
                     beep.beep();
                     app.say("copying into an ssh session isn't there yet", app.theme.stderr_accent);
+                    app.fxAtMouse(.failed, "can't copy into an ssh session yet");
                 },
-                .folder => |dest| app.startCopy(app.drop_paths.items, dest),
+                .folder => |dest| app.askCopy(dest),
             }
         },
         else => {},
@@ -3854,6 +3898,7 @@ fn tickInsideDrop(app: *App) void {
         .remote => {
             beep.beep();
             app.say("copying into an ssh session isn't there yet", app.theme.stderr_accent);
+            app.fxAtMouse(.failed, "can't copy into an ssh session yet");
         },
         .window => {
             if (alreadyIn(path, t.dest())) {
@@ -3863,9 +3908,12 @@ fn tickInsideDrop(app: *App) void {
             if (w.sync == .follower) return app.readOnly(w);
             if (!w.atPrompt()) {
                 beep.beep();
-                return app.sayFmt("#{d}: the shell is busy", .{w.serial}, app.theme.stderr_accent);
+                app.sayFmt("#{d}: the shell is busy", .{w.serial}, app.theme.stderr_accent);
+                return app.fxAtMouse(.failed, "the shell is busy: nothing copied");
             }
             w.typeFileCommand(if (move) "mv" else "cp", path, if (t.outlined) t.dest() else null);
+            var fbuf: [200]u8 = undefined;
+            app.fxAtMouse(.info, std.fmt.bufPrint(&fbuf, "{s} {s} typed: Enter runs it", .{ if (move) "mv" else "cp", std.fs.path.basename(path) }) catch "typed: Enter runs it");
             _ = c.SDL_RaiseWindow(app.window);
             if (app.indexOfWindow(w)) |i| app.setFocus(i);
             app.sayFmt("Enter: {s} {s}", .{ if (move) "mv" else "cp", std.fs.path.basename(path) }, app.theme.dim);
@@ -3904,17 +3952,138 @@ fn dropTarget(app: *App, buf: []u8) DropTarget {
     return if (d.len > 0) .{ .folder = d } else .none;
 }
 
+/// What the open modal's answer is for. A job owns its data until
+/// `resolveModal` (or `closeModal`) frees it.
+const ModalJob = union(enum) {
+    none,
+    /// Files dropped in from another app: copy them into `dest` (window
+    /// `window`)? Buttons: 0 Cancel, 1 Copy.
+    copy_drop: struct { paths: [][:0]u8, dest: [:0]u8, window: ids_mod.Id },
+};
+
+/// Open a modal for `job` (one at a time: one already open gets its safe
+/// answer first).
+fn openModal(app: *App, spec: Modal.Spec, job: ModalJob) void {
+    if (app.modal) |m| app.resolveModal(m.safe, .replaced);
+    app.closeMenu();
+    app.closePeek();
+    app.hideTip();
+    app.modal = Modal.init(spec, c.SDL_GetTicks());
+    app.modal_job = job;
+    app.dirty = true;
+}
+
+/// How the modal's answer came: picked, no answer in time, or a newer
+/// modal took its place.
+const ModalHow = enum { picked, timeout, replaced };
+
+/// Act on the modal's answer (button `pick`) and close it.
+fn resolveModal(app: *App, pick: usize, how: ModalHow) void {
+    const job = app.modal_job;
+    app.modal = null;
+    app.modal_job = .none;
+    app.dirty = true;
+    switch (job) {
+        .none => {},
+        .copy_drop => |d| {
+            defer {
+                for (d.paths) |p| app.gpa.free(p);
+                app.gpa.free(d.paths);
+                app.gpa.free(d.dest);
+            }
+            if (pick == 1) return app.startCopy(d.paths, d.dest, d.window);
+            const text = switch (how) {
+                .picked => "copy cancelled",
+                .timeout => "no answer: copy cancelled",
+                .replaced => "another drop came: copy cancelled",
+            };
+            app.say(text, app.theme.dim);
+            app.finishFx(app.fxOn(d.window, text), .cancelled, text);
+        },
+    }
+}
+
+/// Each frame while a modal is open: redraw (the countdown); no answer
+/// in time → its safe button.
+fn tickModal(app: *App) void {
+    const m = app.modal orelse return;
+    app.dirty = true;
+    if (m.expired(c.SDL_GetTicks())) app.resolveModal(m.safe, .timeout);
+}
+
+/// Files dropped from another app on a job window: ask before copying
+/// them into `dest` (the dropped paths are taken from `drop_paths`).
+fn askCopy(app: *App, dest: []const u8) void {
+    const pt = app.mouse orelse return;
+    const i = app.windowAt(pt[0], pt[1]) orelse return;
+    const window = app.jobs.items[i].uid;
+    const dz = app.gpa.dupeZ(u8, dest) catch return;
+    const paths = app.drop_paths.toOwnedSlice(app.gpa) catch {
+        app.gpa.free(dz);
+        return;
+    };
+    var tbuf: [300]u8 = undefined;
+    var bbuf: [1024]u8 = undefined;
+    const name = std.fs.path.basename(dest);
+    const title = std.fmt.bufPrint(&tbuf, "Copy into {s}?", .{if (name.len > 0) name else "/"}) catch "Copy?";
+    var what_buf: [400]u8 = undefined;
+    const what = if (paths.len == 1)
+        std.fs.path.basename(paths[0])
+    else blk: {
+        var n: usize = 0;
+        const head = std.fmt.bufPrint(&what_buf, "{d} items: ", .{paths.len}) catch break :blk "items";
+        n = head.len;
+        for (paths, 0..) |p, k| {
+            const b = std.fs.path.basename(p);
+            const sep: []const u8 = if (k == 0) "" else ", ";
+            if (n + sep.len + b.len + 1 > 60) {
+                const more = "…";
+                if (n + more.len <= what_buf.len) {
+                    @memcpy(what_buf[n..][0..more.len], more);
+                    n += more.len;
+                }
+                break;
+            }
+            @memcpy(what_buf[n..][0..sep.len], sep);
+            n += sep.len;
+            @memcpy(what_buf[n..][0..b.len], b);
+            n += b.len;
+        }
+        break :blk what_buf[0..n];
+    };
+    var sbuf: [256]u8 = undefined;
+    const home = if (c.getenv("HOME")) |h| std.mem.span(h) else "";
+    const body = std.fmt.bufPrint(&bbuf, "{s}\ninto {s}\nA name already there gets a number; nothing is overwritten.", .{ what, Menu.shortPath(&sbuf, dest, home, 60) }) catch what;
+    app.openModal(.{
+        .title = title,
+        .body = body,
+        .buttons = &.{ .{ .label = "Cancel" }, .{ .label = "Copy", .kind = .primary } },
+        .default = 1,
+        .safe = 0,
+    }, .{ .copy_drop = .{ .paths = paths, .dest = dz, .window = window } });
+}
+
 /// A copy of dropped files running in the background.
 const Copying = struct {
     pid: c_int,
     n: usize,
     name_buf: [256]u8 = undefined,
     name_len: usize = 0,
+    /// The first item's name (the one named when only one is copied).
+    item_buf: [256]u8 = undefined,
+    item_len: usize = 0,
+    /// Its FileFx on the window it was dropped on.
+    fx: FxRef = .{},
+
+    fn what(cp: *const Copying, buf: []u8) []const u8 {
+        if (cp.n == 1) return cp.item_buf[0..cp.item_len];
+        return std.fmt.bufPrint(buf, "{d} items", .{cp.n}) catch "items";
+    }
 };
 
 /// Copy `paths` into folder `dest` in the background (gtty_copy: a name
 /// that is there already gets a number; nothing is overwritten).
-fn startCopy(app: *App, paths: []const [:0]u8, dest: []const u8) void {
+fn startCopy(app: *App, paths: []const [:0]u8, dest: []const u8, window: ids_mod.Id) void {
     const ptrs = app.gpa.alloc([*c]const u8, paths.len) catch return;
     defer app.gpa.free(ptrs);
     for (paths, 0..) |p, i| ptrs[i] = p.ptr;
@@ -3922,13 +4091,21 @@ fn startCopy(app: *App, paths: []const [:0]u8, dest: []const u8) void {
     const dz = std.fmt.bufPrintZ(&dbuf, "{s}", .{dest}) catch return;
     const pid = c.gtty_copy_start(ptrs.ptr, @intCast(paths.len), dz.ptr);
     const name = std.fs.path.basename(dest);
+    var fbuf: [200]u8 = undefined;
     if (pid < 0) {
         beep.beep();
-        return app.sayFmt("could not copy into {s}", .{name}, app.theme.stderr_accent);
+        app.sayFmt("could not copy into {s}", .{name}, app.theme.stderr_accent);
+        const text = std.fmt.bufPrint(&fbuf, "could not copy into {s}", .{name}) catch "could not copy";
+        return app.finishFx(app.fxOn(window, text), .failed, text);
     }
     var cp: Copying = .{ .pid = pid, .n = paths.len };
     cp.name_len = @min(name.len, cp.name_buf.len);
     @memcpy(cp.name_buf[0..cp.name_len], name[0..cp.name_len]);
+    const item = std.fs.path.basename(paths[0]);
+    cp.item_len = @min(item.len, cp.item_buf.len);
+    @memcpy(cp.item_buf[0..cp.item_len], item[0..cp.item_len]);
+    var wbuf: [32]u8 = undefined;
+    cp.fx = app.fxOn(window, std.fmt.bufPrint(&fbuf, "copying {s} into {s}…", .{ cp.what(&wbuf), name }) catch "copying…");
     app.copying.append(app.gpa, cp) catch {};
     app.sayFmt("copying {d} item{s} into {s}…", .{ paths.len, if (paths.len == 1) "" else "s", name }, app.theme.dim);
 }
@@ -3945,13 +4122,86 @@ fn tickCopies(app: *App) void {
         }
         _ = app.copying.swapRemove(i);
         const name = cp.name_buf[0..cp.name_len];
+        var fbuf: [200]u8 = undefined;
+        var wbuf: [32]u8 = undefined;
         if (r == 0) {
             app.sayFmt("copied {d} item{s} into {s}", .{ cp.n, if (cp.n == 1) "" else "s", name }, app.theme.ok);
+            app.finishFx(cp.fx, .ok, std.fmt.bufPrint(&fbuf, "copied {s} into {s}", .{ cp.what(&wbuf), name }) catch "copied");
         } else {
             beep.beep();
-            app.sayFmt("copy into {s}: {d} of {d} failed", .{ name, @min(@as(usize, @intCast(r)), cp.n), cp.n }, app.theme.stderr_accent);
+            const failed = @min(@as(usize, @intCast(r)), cp.n);
+            app.sayFmt("copy into {s}: {d} of {d} failed", .{ name, failed, cp.n }, app.theme.stderr_accent);
+            app.finishFx(cp.fx, .failed, std.fmt.bufPrint(&fbuf, "copy into {s}: {d} of {d} failed", .{ name, failed, cp.n }) catch "copy failed");
         }
     }
+}
+
+/// A file dragged out of gtty: once the drag ended, look for it every
+/// 100 ms for 2 s; gone (the target moved it) → say so on its window.
+fn tickDragOut(app: *App) void {
+    const d = &(app.drag_out orelse return);
+    if (c.gtty_drag_active()) return;
+    const now = c.SDL_GetTicks();
+    if (d.ended_ms == 0) d.ended_ms = now;
+    if (now < d.next_ms) return;
+    d.next_ms = now + 100;
+    const path = app.drag_path orelse {
+        app.drag_out = null;
+        return;
+    };
+    if (std.c.access(path.ptr, std.c.F_OK) != 0) {
+        const uid = d.window;
+        app.drag_out = null;
+        const w = app.jobByUid(uid) orelse return;
+        var fbuf: [200]u8 = undefined;
+        const from = std.fs.path.basename(std.fs.path.dirname(path) orelse "/");
+        const text = std.fmt.bufPrint(&fbuf, "moved {s} out of {s}", .{ std.fs.path.basename(path), if (from.len > 0) from else "/" }) catch "moved out";
+        app.finishFx(app.newFx(w, text), .ok, text);
+        app.sayFmt("{s}", .{text}, app.theme.dim);
+        return;
+    }
+    if (now -| d.ended_ms > 2000) app.drag_out = null;
+}
+
+/// A FileFx on a job window: which one, and which of its effects (a
+/// later one replaces it).
+const FxRef = struct { window: ids_mod.Id = 0, id: u32 = 0 };
+
+/// A FileFx (working) on window `w`.
+fn newFx(app: *App, w: *JobWindow, text: []const u8) FxRef {
+    const id = app.fx_next_id;
+    app.fx_next_id +%= 1;
+    if (app.fx_next_id == 0) app.fx_next_id = 1;
+    w.file_fx = FileFx.init(id, c.SDL_GetTicks(), text);
+    app.dirty = true;
+    return .{ .window = w.uid, .id = id };
+}
+
+/// A FileFx (working) on job window `uid` (gone: an empty ref).
+fn fxOn(app: *App, uid: ids_mod.Id, text: []const u8) FxRef {
+    const w = app.jobByUid(uid) orelse return .{};
+    return app.newFx(w, text);
+}
+
+/// A FileFx (working) on the job window under the mouse (none there:
+/// an empty ref).
+fn startFx(app: *App, text: []const u8) FxRef {
+    const pt = app.mouse orelse return .{};
+    const i = app.windowAt(pt[0], pt[1]) orelse return .{};
+    return app.newFx(app.jobs.items[i], text);
+}
+
+/// A FileFx on the job window under the mouse that is done at once.
+fn fxAtMouse(app: *App, state: FileFx.State, text: []const u8) void {
+    app.finishFx(app.startFx(text), state, text);
+}
+
+fn finishFx(app: *App, ref: FxRef, state: FileFx.State, text: []const u8) void {
+    const w = app.jobByUid(ref.window) orelse return;
+    const f = if (w.file_fx) |*f| f else return;
+    if (f.id != ref.id) return;
+    f.finish(state, text, c.SDL_GetTicks());
+    app.dirty = true;
 }
 
 /// The file opener turned on / off (settings): every window drops its
@@ -4225,6 +4475,7 @@ fn onMouseLeave(app: *App) void {
 }
 
 fn onWheel(app: *App, x: f32, y: f32, dy: f32) void {
+    if (app.modal != null) return;
     app.closeMenu();
     if (app.peek) |*pk| if (pk.contains(x, y)) {
         pk.wheel(dy);
@@ -4444,6 +4695,18 @@ fn render(app: *App) void {
             app.menu = null;
             app.sub_menu = null;
         }
+    }
+    if (app.modal) |*m| {
+        // Over the window it is about, when that one is in the windows area.
+        var area = app.desktop_r;
+        switch (app.modal_job) {
+            .none => {},
+            .copy_drop => |d| if (app.jobByUid(d.window)) |w| if (app.indexOfWindow(w)) |i| if (app.isShown(i)) {
+                area = w.rect;
+            },
+        }
+        const screen: Rect = .{ .x = 0, .y = 0, .w = app.width_px, .h = app.height_px };
+        m.draw(&app.gfx, t, f, app.statusFace(), screen, area, app.mouse, app.scale.ui, c.SDL_GetTicks());
     }
     if (app.about_visible) app.drawAbout(f);
     app.drawTip();

@@ -227,7 +227,9 @@ Finder, a mail, an editor — as if you dragged it from the file manager
 (Linux: under Wayland; X11 has no drag and drop in gtty). A quick press and drag still selects text.
 Names with `:12:3` after them (compiler messages, `grep -n`), in quotes,
 `file://` URLs, `a/` / `b/` from `git diff`, and Windows-style `src\x.c`
-work too. A folder name in a shell window (zsh / bash, waiting for your
+work too, and so do names with spaces or brackets as `ls` prints them
+(`My File.txt`, `report (1).pdf`, `docs/Big Plan.md`): gtty looks them up
+in the folder's list of files. A folder name in a shell window (zsh / bash, waiting for your
 input): a double-click `cd`s the shell there. Programs and scripts are never
 opened this way.
 
@@ -253,8 +255,15 @@ Drag files from another app (Finder, the file manager, a mail) onto a job
 window: they are **copied** into the folder that window's shell is in. Over a
 folder name in the window's output, that name gets a box: drop there to
 copy into that folder. A name that's already there gets a number (`notes 2.txt`), so
-nothing is overwritten; the status bar says where a drop would go and when
-the copy is done. Not into ssh sessions yet. On Linux this needs Wayland.
+nothing is overwritten; the status bar says where a drop would go.
+
+Before anything is copied, gtty asks: **Copy into X?** with the files and
+the folder. Enter or **Copy** copies; Esc or **Cancel** doesn't. The
+question waits 10 seconds (the countdown is in its corner and along its
+bottom); with no answer, nothing is copied. The window then shows what
+happened in a bubble, as the title-bar copy does: "copying…", then
+"✓ copied notes.txt into src" (or why it failed) for a moment. Not into
+ssh sessions yet. On Linux this needs Wayland.
 
 ### The files of a window's folder
 

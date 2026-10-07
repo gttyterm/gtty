@@ -405,6 +405,11 @@ the shell. Users expect it to behave like a shell in a terminal.
   on every mouse move over its text (`sendHover`), `opener.leave` when the
   mouse leaves. `JobWindow.textChanged` (App, each frame) drops the outline
   when the text version changed, then App hovers again. Hover → candidates
+  (names with blanks / punctuation first: `file_path.longestKnown`,
+  the longest word-edge span around the mouse that is in a folder's
+  listing, `src/ui/DirCache.zig`: last 8 folders, only the names a
+  plain run misses, read again when the folder's mtime changes; added
+  2026-10-07, `test/filenames.gt`)
   → resolved against the window's folder → existing regular
   non-executable file → `mark` (text range), drawn dashed by the window
   (`drawFileMark`, windows area only; none while selecting text,
@@ -432,10 +437,24 @@ the shell. Users expect it to behave like a shell in a terminal.
     files from another app; `FileOpener.drop_mode` outlines folder names
     only (anywhere); the status bar says where it goes (`helpLine`,
     `dropTarget`: outlined folder, else the window's `folder`; ssh
-    window: not yet). On the drop `startCopy` → `gtty_copy_start`
+    window: not yet). On the drop `askCopy` opens a **modal**
+    ("Copy into X?", Cancel / Copy, 10 s; `ModalJob.copy_drop` owns the
+    paths); Copy → `startCopy` → `gtty_copy_start`
     (`src/sys/gtty_copy.c`: child runs `cp -Rp` per item, a taken name
     gets " 2", " 3"… before the extension, a folder never into itself),
-    polled in `tickCopies` (notice).
+    polled in `tickCopies` (notice). Cancel / Esc / no answer: nothing
+    copied ("copy cancelled").
+  - **Feedback on the window** (`src/ui/FileFx.zig`, `JobWindow.file_fx`,
+    added 2026-10-07: the copy took a few ms, unseen): the look of the
+    title-bar copy's "✓ Copied" (white flash, then the shared
+    `JobWindow.bubble`): "↓ copying X into Y…" (blue, ≥ 400 ms), a
+    second flash and the result for 1.6 s (green copied, red failed,
+    gray cancelled, blue "cp X typed: Enter runs it" for a drop between
+    job windows); grid windows too (over the cell). App: `fxOn` /
+    `startFx` / `finishFx` (`FxRef`: window + id). A file dragged out
+    that is gone from its folder within 2 s of the drag's end
+    (`drag_out`, `tickDragOut`: the target moved it) → "✓ moved X out
+    of Y".
   - **Between job windows:** gtty's own drag dropped on gtty
     (`drop_inside`, set when `gtty_drag_active` at the drop's start): the
     file is `App.drag_path` (SDL's data ignored: on Wayland SDL can't read
@@ -656,6 +675,15 @@ decisions; items marked *open* are undecided.
   bar: the file opener's help line on the left, short notices on the right.
 - `src/ui/Peek.zig` — a chip's peek / expanded peek (git branches: filter,
   switch); App owns it and routes mouse / keys to it.
+- `src/ui/Modal.zig` — the modal dialog (reusable; added 2026-10-07):
+  title, body lines, ≤ 3 buttons (`Kind` normal / primary / danger),
+  `default` (Enter, focused), `safe` (Esc and the **timeout**, always
+  there: default 10 s, countdown text + shrinking bar; with no answer
+  the less critical choice is taken). App: `modal`, `modal_job`
+  (`ModalJob`, what the answer is for), `openModal` (one open gets its
+  safe answer first), `resolveModal`, `tickModal`; it takes every key /
+  click / wheel while open, drawn over a dimmed screen, centered on its
+  window. Test: `test/filefx.gt`.
 - `src/ui/Menu.zig` — pop-up menus: generic rows (label, key / note,
   enabled) + optional dim title; `purpose` = `edit` (right-click Copy /
   Paste), `open_with` (`show`'s app picker) or `bar` (a menu of the drawn
