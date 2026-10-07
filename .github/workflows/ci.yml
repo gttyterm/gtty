@@ -1,13 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Build + unit tests on Linux and macOS for every push to main and every
-# pull request. Read-only: no secrets, no write access.
+# Build + unit tests on Linux and macOS for every pull request (or run by
+# hand). A push to main runs nothing. Read-only: no secrets, no write access.
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 

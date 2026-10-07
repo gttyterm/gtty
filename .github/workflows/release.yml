@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Release: a tag v<version> (the version in build.zig.zon) builds the
-# self-contained binaries, signs + notarizes the macOS dmg
-# (scripts/sign-macos.sh, secrets of the environment "release"), makes the
-# .deb / .rpm / .tar.gz and publishes them as a GitHub release.
+# Release: publishing a GitHub release whose tag is v<version> (the version
+# in build.zig.zon) builds the self-contained binaries, signs + notarizes
+# the macOS dmg (scripts/sign-macos.sh, secrets of the environment
+# "release"), makes the .deb / .rpm / .tar.gz and uploads them to that
+# release. Pushing a tag alone does nothing.
 #
-#   git tag v0.0.6 && git push origin v0.0.6
+#   gh release create v0.0.6 --generate-notes
+#   (or GitHub → Releases → Draft a new release → Publish)
 #
 # Run by hand (Actions → Release → Run workflow): the same build, signed
 # and notarized, kept as a workflow artifact only; no release, no tag.
@@ -17,8 +19,8 @@
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
 
 # Nothing by default; the job asks for exactly what it needs.
@@ -34,7 +36,7 @@ jobs:
     runs-on: macos-15
     environment: release
     permissions:
-      contents: write # create the release and upload its files
+      contents: write # upload the packages to the published release
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
@@ -50,11 +52,13 @@ jobs:
 
       - name: Version
         id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           v=$(sed -n 's/^ *\.version = "\(.*\)",/\1/p' build.zig.zon | head -1)
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$v" ]; then
-            echo "::error::tag $GITHUB_REF_NAME doesn't match build.zig.zon's version $v (expected v$v)"
+          if [ -n "$TAG" ] && [ "$TAG" != "v$v" ]; then
+            echo "::error::tag $TAG doesn't match build.zig.zon's version $v (expected v$v)"
             exit 1
           fi
 
@@ -97,14 +101,14 @@ jobs:
             dist/gtty_${{ steps.version.outputs.version }}_*
           if-no-files-found: error
 
-      - name: Publish the release
-        if: github.ref_type == 'tag'
+      - name: Upload to the release
+        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           v=${{ steps.version.outputs.version }}
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --title "gtty $v" --generate-notes --verify-tag \
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
             "dist/gtty-$v-macos.dmg" "dist/gtty_${v}_amd64.deb" \
             "dist/gtty-$v-1.x86_64.rpm" "dist/gtty-$v-linux-x86_64.tar.gz" \
             "dist/gtty-$v-SHA256SUMS.txt"

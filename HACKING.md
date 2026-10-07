@@ -26,10 +26,11 @@ files stay outside the repo, in `$GTTY_SIGNING_DIR`, default `~/tmp`).
 `release` for CI. Details in CLAUDE.md ("Signed releases").
 
 CI (`.github/workflows/ci.yml`) builds and runs the unit tests on Linux
-and macOS for every push and pull request. A release is a tag:
-`git tag v<version> && git push origin v<version>` (the version in
-`build.zig.zon`); `.github/workflows/release.yml` builds, signs,
-notarizes and publishes the packages as a GitHub release.
+and macOS for every pull request (a push to main runs nothing). A release
+is a published GitHub release with the tag `v<version>` (the version in
+`build.zig.zon`), e.g. `gh release create v<version> --generate-notes`;
+`.github/workflows/release.yml` then builds, signs, notarizes and uploads
+the packages to it. Pushing a tag alone builds nothing.
 
 Not yet: full-screen programs (vim, htop, less), bold/italic, and scrolling back past the memory window. New commands from the
 prompt still start in gtty's own folder (a shell window's `cd` doesn't carry

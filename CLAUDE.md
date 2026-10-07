@@ -710,14 +710,17 @@ decisions; items marked *open* are undecided.
 - Repo: git.foodineat.com, org GTTY, repo gtty (Forgejo); public:
   GitHub `git@github.com:gttyterm/gitty.git` (repo name **gitty**). Local:
   ~/src/gtty/gtty.
-- **GitHub Actions** (`.github/workflows/`): `ci.yml` (push to main,
-  pull requests: build + unit tests on ubuntu-24.04 with `-Dbundled-sdl`
-  and macos-15 with Homebrew SDL3; `contents: read`); `release.yml` (tag
-  `v<version>`, must match build.zig.zon: macos-15, environment
+- **GitHub Actions** (`.github/workflows/`): `ci.yml` (pull requests
+  and by hand only, nothing on a push to main: build + unit tests on
+  ubuntu-24.04 with `-Dbundled-sdl` and macos-15 with Homebrew SDL3;
+  `contents: read`); `release.yml` (a GitHub release published, tag
+  `v<version>`, must match build.zig.zon; a tag push alone does
+  nothing: macos-15, environment
   `release` with the signing secrets, runs `scripts/sign-macos.sh`
   (CI path: temporary keychain, API-key notarization) → build-bin.sh +
   package.sh, checks the dmg (codesign, stapler, spctl), SHA256SUMS,
-  `gh release create` with the dmg, .deb, .rpm, .tar.gz; workflow-level
+  `gh release upload --clobber` of the dmg, .deb, .rpm, .tar.gz into that
+  release; workflow-level
   `permissions: {}`, the job asks for `contents: write` explicitly; run by
   hand = the same build as an artifact, no release). The Finder layout
   of the dmg needs Automation access on the runner; if it fails the dmg
