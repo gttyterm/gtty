@@ -1,0 +1,8 @@
+Here is the plan:
+```json
+{"summary":"list the files here, then remove the .tmp ones","danger":false,"actions":[
+ {"type":"shell","target":"current","script":"ls -l | head -5"},
+ {"type":"shell","target":"current","script":"n=0\nfor f in ./*.tmp; do [ -e \"$f\" ] && rm -f -- \"$f\" && n=$((n+1)); done\necho \"removed $n files\""},
+ {"type":"remember","text":"scratch files live in /tmp"},
+ {"type":"message","text":"done"}]}
+```

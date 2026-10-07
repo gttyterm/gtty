@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# AI at the prompt, without a provider: GTTY_AI_REPLY's file is the answer.
+# Run: zig build && GTTY_AI_REPLY=test/ai-reply.json GTTY_AI_MEMORY=/tmp/gtty-ai-mem \
+#        zig-out/bin/gtty --script test/ai.gt
+# Expect: the request in the shell's line (gtty-ai 1 '…'), purple marks;
+# the rm script (gtty's own check: dangerous) printed, asking y/N; after
+# "n": "not run". The memory file gets the folder and the note.
+/s
+/wait 2000
+/type cd /tmp
+/wait 600
+/click 500 690
+/wait 300
+/type look at the files here and clean up the tmp files -x
+/wait 2500
+/shot ai-1-asks.bmp
+/type n
+/wait 1000
+/shot ai-2-not-run.bmp
+/quit

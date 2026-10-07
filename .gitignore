@@ -1,0 +1,8 @@
+zig-out/
+.zig-cache/
+*.bmp
+.DS_Store
+zig-pkg/
+bin/
+test/fake-ssh/bin/
+dist/

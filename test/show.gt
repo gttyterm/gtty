@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The show command. Run: zig build && GTTY_SHOW_DRY=1 zig-out/bin/gtty --script test/show.gt
+# (GTTY_SHOW_DRY: only says which app would open the file.)
+show README.md
+/wait 600
+/shot show-1-default.bmp
+show nosuch-file.txt
+/wait 600
+/shot show-2-missing.bmp
+show -a README.md
+/wait 600
+/shot show-3-picker.bmp
+/click 60 592
+/wait 400
+/shot show-5-picked.bmp
+show build.zig.zon
+/wait 600
+/shot show-4-nodefault.bmp
+/quit

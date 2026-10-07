@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Paste and the right-click menu. Run: zig build && zig-out/bin/gtty --script test/paste.gt
+# Put something on the clipboard first, e.g.  printf 'echo one\necho two' | pbcopy
+/s
+/wait 1500
+/key cmd+v
+/wait 600
+/shot paste-1-shortcut.bmp
+/key escape
+/rclick 300 200
+/wait 300
+/move 320 235
+/wait 300
+/shot paste-2-menu.bmp
+/key escape
+/rclick 300 700
+/wait 300
+/shot paste-3-prompt-menu.bmp
+/wait 500
+/quit

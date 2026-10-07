@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# README hero: commands typed at the gtty prompt each open their own job
+# window; a finished one turns green, a failed one red with its exit
+# code; older windows move into the job grid. Recorded by make.sh.
+/resize 1200 520
+/s
+/wait 1800
+/type ls
+/wait 300
+/click 600 448
+/move 700 470
+/pace 250
+/record start @FRAMES@ 20
+/wait 350
+/slow make
+/key enter
+/wait 650
+/slow python3 -m http.server 8000
+/key enter
+/wait 650
+/glide 500 448 350
+/click 500 448
+/slow cat nosuch.txt
+/key enter
+/wait 700
+/glide 700 470 300
+/wait 300
+/record stop
+/quit

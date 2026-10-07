@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Build + unit tests on Linux and macOS for every push to main and every
+# pull request. Read-only: no secrets, no write access.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux (x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      # SDL3 / SDL3_ttf / freetype from source (-Dbundled-sdl): the
+      # distribution's SDL3 may be missing or too old.
+      - name: Build
+        run: zig build -Dbundled-sdl
+      - name: Unit tests
+        run: zig build test -Dbundled-sdl
+
+  macos:
+    name: macOS (arm64)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      # As on a developer's Mac: Homebrew's SDL3 (build.zig looks in
+      # /opt/homebrew).
+      - name: Install SDL3
+        run: brew install sdl3 sdl3_ttf
+      - name: Build
+        run: zig build
+      - name: Unit tests
+        run: zig build test

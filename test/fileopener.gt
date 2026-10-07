@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The file opener: the mouse on a file name outlines it, a double-click
+# opens it (Shift: picks the app), holding the button on it and moving
+# drags the file out. Run from the repo root (macOS, 1x display):
+#   zig build && GTTY_SHOW_DRY=1 GTTY_DRAG_DRY=1 zig-out/bin/gtty --script test/fileopener.gt
+# (GTTY_SHOW_DRY: only says which app would open the file; GTTY_DRAG_DRY:
+# only says what would be dragged.) Output row y 84, cell width 8: column
+# k is at x = 22 + 8k + 4.
+/s bash
+/wait 1500
+/type clear
+/wait 500
+/type echo \"README.md\" build.zig:12:3 scripts/build-bin.sh nosuch.txt
+/wait 600
+# README.md (col 3), build.zig (col 15), the script (exec, col 30), missing (col 52)
+/move 46 84
+/wait 300
+/shot fo-1-readme.bmp
+/move 146 84
+/wait 300
+/shot fo-2-line-col.bmp
+/move 266 84
+/wait 300
+/shot fo-3-program.bmp
+/move 442 84
+/wait 300
+/shot fo-4-missing.bmp
+/dclick 46 84
+/wait 500
+/shot fo-5-opened.bmp
+/mods shift
+/dclick 146 84
+/wait 600
+/shot fo-6-picker.bmp
+/mods none
+/key escape
+# Hold on the name (the outline turns solid), then move: the file is dragged.
+/down 46 84
+/wait 500
+/shot fo-7-held.bmp
+/move 120 200
+/up 120 200
+/wait 300
+/shot fo-8-dragged.bmp
+# A quick press and move on a name selects text instead.
+/drag 46 84 150 84
+/wait 300
+/shot fo-9-select.bmp
+# A folder: double-click cd's the shell there.
+/click 700 400
+/wait 300
+/type clear
+/wait 500
+/type echo src
+/wait 600
+/move 30 84
+/wait 300
+/shot fo-10-folder.bmp
+/dclick 30 84
+/wait 600
+/type pwd
+/wait 600
+/shot fo-11-cd.bmp
+/quit

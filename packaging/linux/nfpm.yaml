@@ -1,0 +1,72 @@
+# .deb (Ubuntu / Debian) and .rpm (Fedora) from the self-contained Linux
+# binary (SDL3, SDL3_ttf, freetype linked in; glibc 2.31+).
+# Used by scripts/package.sh, which stages the files in .zig-cache/package/linux
+# and sets VERSION and ARCH.
+name: gtty
+version: ${VERSION}
+arch: ${ARCH}
+platform: linux
+section: x11
+priority: optional
+maintainer: Sagi Forbes Nagar <feralkeep.studios@gmail.com>
+description: |
+  A graphical terminal: every command gets its own job window.
+  Your own shell (zsh / bash) runs the commands.
+homepage: https://github.com/gttyterm/gitty
+license: GPL-3.0-or-later
+
+# Only the C library is linked; SDL loads X11 / Wayland, GL and audio
+# from the desktop at run time (any desktop install has them).
+overrides:
+  deb:
+    depends: ["libc6 (>= 2.31)"]
+    recommends: [libx11-6, libxext6, libwayland-client0, libxkbcommon0, libegl1, libgl1, libasound2 | libpulse0, libglib2.0-bin]
+  rpm:
+    depends: ["glibc >= 2.31"]
+    recommends: [libX11, libXext, libwayland-client, libxkbcommon, mesa-libEGL, mesa-libGL, pipewire-pulseaudio, glib2]
+
+contents:
+  - src: ./.zig-cache/package/linux/gtty
+    dst: /usr/bin/gtty
+    file_info: {mode: 0755}
+  - src: ./packaging/linux/gtty.desktop
+    dst: /usr/share/applications/gtty.desktop
+    file_info: {mode: 0644}
+  # One by one (no tree): the hicolor folders belong to the icon theme.
+  - src: ./.zig-cache/package/linux/icons/16x16/apps/gtty.png
+    dst: /usr/share/icons/hicolor/16x16/apps/gtty.png
+    file_info: {mode: 0644}
+  - src: ./.zig-cache/package/linux/icons/24x24/apps/gtty.png
+    dst: /usr/share/icons/hicolor/24x24/apps/gtty.png
+    file_info: {mode: 0644}
+  - src: ./.zig-cache/package/linux/icons/32x32/apps/gtty.png
+    dst: /usr/share/icons/hicolor/32x32/apps/gtty.png
+    file_info: {mode: 0644}
+  - src: ./.zig-cache/package/linux/icons/48x48/apps/gtty.png
+    dst: /usr/share/icons/hicolor/48x48/apps/gtty.png
+    file_info: {mode: 0644}
+  - src: ./.zig-cache/package/linux/icons/64x64/apps/gtty.png
+    dst: /usr/share/icons/hicolor/64x64/apps/gtty.png
+    file_info: {mode: 0644}
+  - src: ./.zig-cache/package/linux/icons/128x128/apps/gtty.png
+    dst: /usr/share/icons/hicolor/128x128/apps/gtty.png
+    file_info: {mode: 0644}
+  - src: ./.zig-cache/package/linux/icons/256x256/apps/gtty.png
+    dst: /usr/share/icons/hicolor/256x256/apps/gtty.png
+    file_info: {mode: 0644}
+  - src: ./.zig-cache/package/linux/icons/512x512/apps/gtty.png
+    dst: /usr/share/icons/hicolor/512x512/apps/gtty.png
+    file_info: {mode: 0644}
+  - src: ./src/assets/JetBrainsMono-OFL.txt
+    dst: /usr/share/doc/gtty/JetBrainsMono-OFL.txt
+    file_info: {mode: 0644}
+  - src: ./LICENSE
+    dst: /usr/share/doc/gtty/LICENSE
+    file_info: {mode: 0644}
+  - src: ./THIRD_PARTY.md
+    dst: /usr/share/doc/gtty/THIRD_PARTY.md
+    file_info: {mode: 0644}
+
+scripts:
+  postinstall: ./packaging/linux/postinstall.sh
+  postremove: ./packaging/linux/postinstall.sh

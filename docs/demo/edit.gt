@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Editing the shell's line like a text field: ⌥←/→ jump words, Shift
+# selects, typing replaces the selection, ⌘V pastes over it (a name
+# copied from the output with a mouse drag).
+/resize 1200 760
+/s
+/wait 1800
+/type ls src/*.py
+/move 600 300
+/wait 600
+/pace 300
+/record start @FRAMES@ 20
+/wait 300
+/slow grep -n total src/catalog.py
+/wait 200
+/key alt+left
+/key left
+/key shift+alt+left
+/wait 200
+/slow price
+/wait 300
+/glide 24 75 400
+/drag 24 75 133 75
+/key cmd+c
+/wait 300
+/key cmd+right
+/key shift+alt+left
+/wait 350
+/key cmd+v
+/wait 400
+/key enter
+/wait 900
+/record stop
+/quit

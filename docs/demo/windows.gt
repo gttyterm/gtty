@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Several job windows side by side: the job grid's header checkbox brings
+# in as many as fit, a click on a grid window brings that one in.
+/resize 1200 760
+/s
+/wait 1800
+/type ls
+/click 600 686
+/type make
+/type git log --oneline
+/type ls src docs assets
+/type cat nosuch.txt
+/type python3 -m http.server 8000
+/click 600 686
+/wait 600
+# Start from one window: the header checkbox clears the selection.
+/click 1056 18
+/move 700 710
+/wait 800
+/pace 250
+/record start @FRAMES@ 20
+/wait 400
+/glide 1056 18 550
+/click 1056 18
+/wait 1200
+/glide 1110 120 500
+/click 1110 120
+/wait 1050
+/glide 700 710 400
+/wait 200
+/record stop
+/quit

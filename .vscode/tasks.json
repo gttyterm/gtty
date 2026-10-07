@@ -1,0 +1,32 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "gtty: build",
+      "type": "shell",
+      "command": "zig build",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "gtty: run",
+      "type": "shell",
+      "command": "zig build run",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "gtty: smoke test",
+      "type": "shell",
+      "command": "zig build run -- --script test/smoke.gt",
+      "problemMatcher": []
+    },
+    {
+      "label": "gtty: unit tests",
+      "type": "shell",
+      "command": "zig build test",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    }
+  ]
+}

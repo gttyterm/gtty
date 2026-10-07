@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Smoke test:  zig build run -- --script test/smoke.gt
+# Each line is typed into the prompt, one every 400 ms. Screenshots land in
+# the current directory as .bmp files.
+/sh
+echo hello from the shell
+ls /
+/run echo "this goes to stdout"; echo "this goes to stderr" >&2; ls /nonexistent-dir
+/run printf '\033[31mred \033[32mgreen \033[34mdark-blue \033[38;2;255;160;0mtruecolor\033[0m\n'; for i in 1 2 3; do echo "line $i"; done
+/wait 1000
+/shot gtty-shot1.bmp
+/focus 1
+/zoom 150%
+/help
+/wait 500
+/shot gtty-shot2.bmp
+/close
+/wait 300
+/shot gtty-shot3.bmp
+/quit

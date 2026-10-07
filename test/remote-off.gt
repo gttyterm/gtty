@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A remote machine gtty can't connect to: the file opener and the git chip
+# are off until that ssh session ends, then back for the next one. And a
+# second hop inside a session (ssh from there): off until back. Run from
+# the repo root (stand-in ssh, see test/remote.gt):
+#   mkdir -p test/fake-ssh/bin && cc -o test/fake-ssh/bin/ssh test/fake-ssh/ssh.c
+#   zig build && GTTY_SHOW_DRY=1 zig-out/bin/gtty --script test/remote-off.gt
+#   pkill -f "sshd: $USER@"
+/s bash
+/wait 1500
+/type export PATH=$PWD/test/fake-ssh/bin:$PATH; clear
+/wait 500
+/type FAKE_SSH_NOLINK=1 ssh me@box
+/wait 1500
+/type clear; echo README.md
+/wait 3000
+/mods cmd
+/move 50 66
+/wait 800
+/shot remote-off-1.bmp
+/mods none
+/type exit
+/wait 1500
+/type ssh me@box
+/wait 1500
+/type clear; echo README.md
+/wait 3500
+/mods cmd
+/move 50 66
+/wait 1200
+/shot remote-off-2-back.bmp
+/mods none
+# Another hop from inside the session: helpers off until back.
+/type FAKE_SSH_NESTED=1 ssh other
+/wait 1500
+/type clear; echo README.md
+/wait 3500
+/mods cmd
+/move 50 66
+/wait 1200
+/shot remote-off-3-nested.bmp
+/mods none
+/type exit
+/wait 3000
+/mods cmd
+/move 52 66
+/wait 1200
+/shot remote-off-4-back-again.bmp
+/mods none
+/type exit
+/wait 800
+/quit

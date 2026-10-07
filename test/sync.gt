@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Sync typing:  zig build run -- --script test/sync.gt
+# Three shells in the windows area; sync typing from the focused one (#3):
+# what is typed there is typed into #1 and #2 (read-only, purple-red frame).
+/s
+/s
+/s
+/wait 2000
+/menu sync-typing
+/wait 300
+/type echo synced from the source
+/wait 600
+/shot sync1.bmp
+/menu sync-typing
+/wait 300
+/type echo only here
+/wait 600
+/shot sync2.bmp
+/quit

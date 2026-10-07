@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Chips in a window's footer: the git chip's peek switches branches, the
+# folder chip jumps to a folder above.
+/resize 1200 760
+/s
+/wait 1800
+/type cd src
+/move 600 300
+/wait 600
+/pace 250
+/record start @FRAMES@ 20
+/wait 200
+/glide 45 646 500
+/wait 700
+/glide 52 638 250
+/click 52 638
+/wait 500
+/slow sea
+/wait 300
+/key enter
+/wait 1050
+/glide 200 646 400
+/click 200 646
+/wait 650
+/key enter
+# the folder peek closes 1 s after "cd sent"
+/wait 1150
+/slow git branch --show-current
+/key enter
+/wait 850
+/record stop
+/quit

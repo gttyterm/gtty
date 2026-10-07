@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=gtty
+GenericName=Terminal
+Comment=A graphical terminal: every command in its own window
+Exec=gtty
+Icon=gtty
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;console;command;prompt;
+StartupWMClass=gtty
+StartupNotify=true

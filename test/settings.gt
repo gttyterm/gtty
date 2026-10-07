@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The gtty menu and the settings window. Run:
+#   zig build && GTTY_CONFIG=/tmp/gtty-test.conf GTTY_MENU_BAR=1 zig-out/bin/gtty --script test/settings.gt
+# (GTTY_CONFIG: a throwaway settings file; GTTY_MENU_BAR: the drawn menu
+# bar of Linux, also on macOS.) Coordinates are for a 1x display.
+/click 30 10
+/wait 500
+/shot settings-1-menu.bmp
+/click 60 45
+/wait 1000
+/target settings
+/shot settings-2-general.bmp
+/click 392 74
+/click 345 111
+/text 20000
+/key enter
+/wait 300
+/click 120 18
+/wait 300
+/click 160 222
+/text #ff8800
+/key enter
+/wait 300
+/shot settings-3-colors.bmp
+/click 215 18
+/wait 300
+/shot settings-4-timing.bmp
+/target main
+/quit

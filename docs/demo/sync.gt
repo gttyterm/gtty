@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Sync typing: what is typed into one window goes to every other window
+# in the windows area (read-only followers, purple-red frame).
+/resize 1200 760
+/s --cwd @ROOT@/shop/docs
+/s --cwd @ROOT@/shop/src
+/s
+/wait 2000
+/move 600 300
+/pace 250
+/record start @FRAMES@ 20
+/wait 300
+/glide 200 24 500
+/click 200 24
+/wait 550
+/slow ls
+/key enter
+/wait 350
+/slow git log --oneline -3
+/key enter
+/wait 1000
+/glide 200 24 300
+/click 200 24
+/wait 550
+/record stop
+/quit

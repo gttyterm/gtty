@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Release: a tag v<version> (the version in build.zig.zon) builds the
+# self-contained binaries, signs + notarizes the macOS dmg
+# (scripts/sign-macos.sh, secrets of the environment "release"), makes the
+# .deb / .rpm / .tar.gz and publishes them as a GitHub release.
+#
+#   git tag v0.0.6 && git push origin v0.0.6
+#
+# Run by hand (Actions → Release → Run workflow): the same build, signed
+# and notarized, kept as a workflow artifact only; no release, no tag.
+#
+# The secrets (MACOS_CERT_P12, MACOS_CERT_PASSWORD, KEYCHAIN_PASSWORD,
+# APPLE_API_KEY_P8, APPLE_API_KEY_ID, APPLE_API_ISSUER_ID, APPLE_TEAM_ID)
+# are loaded by scripts/set-github-secrets.sh.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Nothing by default; the job asks for exactly what it needs.
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, sign, notarize, publish
+    runs-on: macos-15
+    environment: release
+    permissions:
+      contents: write # create the release and upload its files
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install packaging tools
+        run: brew install nfpm
+
+      - name: Version
+        id: version
+        run: |
+          v=$(sed -n 's/^ *\.version = "\(.*\)",/\1/p' build.zig.zon | head -1)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$v" ]; then
+            echo "::error::tag $GITHUB_REF_NAME doesn't match build.zig.zon's version $v (expected v$v)"
+            exit 1
+          fi
+
+      # build-bin.sh (macOS + Linux binaries), package.sh (dmg, deb, rpm,
+      # tar.gz), signing in a temporary keychain, notarization + staple.
+      - name: Build, sign and notarize
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: scripts/sign-macos.sh
+
+      - name: Check the dmg
+        run: |
+          dmg="dist/gtty-${{ steps.version.outputs.version }}-macos.dmg"
+          codesign --verify --strict --verbose=2 "$dmg"
+          xcrun stapler validate "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose "$dmg"
+          mnt=$(hdiutil attach -nobrowse -readonly "$dmg" | sed -n 's|^/dev/[^[:space:]]*[[:space:]]*Apple_HFS[[:space:]]*||p')
+          codesign --verify --deep --strict --verbose=2 "$mnt/gtty.app"
+          spctl --assess --type execute --verbose "$mnt/gtty.app"
+          hdiutil detach -quiet "$mnt"
+
+      - name: Checksums
+        run: |
+          cd dist
+          v=${{ steps.version.outputs.version }}
+          shasum -a 256 "gtty-$v-macos.dmg" "gtty_${v}_amd64.deb" "gtty-$v-1.x86_64.rpm" "gtty-$v-linux-x86_64.tar.gz" > "gtty-$v-SHA256SUMS.txt"
+          cat "gtty-$v-SHA256SUMS.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gtty-${{ steps.version.outputs.version }}
+          path: |
+            dist/gtty-${{ steps.version.outputs.version }}-*
+            dist/gtty_${{ steps.version.outputs.version }}_*
+          if-no-files-found: error
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${{ steps.version.outputs.version }}
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "gtty $v" --generate-notes --verify-tag \
+            "dist/gtty-$v-macos.dmg" "dist/gtty_${v}_amd64.deb" \
+            "dist/gtty-$v-1.x86_64.rpm" "dist/gtty-$v-linux-x86_64.tar.gz" \
+            "dist/gtty-$v-SHA256SUMS.txt"

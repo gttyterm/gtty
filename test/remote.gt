@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Remote sessions with a stand-in ssh (the "remote machine" is this one).
+# Run from the repo root (macOS, 1x display):
+#   mkdir -p test/fake-ssh/bin && cc -o test/fake-ssh/bin/ssh test/fake-ssh/ssh.c
+#   zig build && GTTY_SHOW_DRY=1 zig-out/bin/gtty --script test/remote.gt
+#   pkill -f "sshd: $USER@"     # the stand-in sshd processes it left
+# Checks: the remote git chip, ⌘-hover / ⌘-click on a remote file (read-only
+# copy, then show), the copy modal and Esc, ⌘-click on a remote folder (cd),
+# the copies deleted when the session ends.
+/s bash
+/wait 1500
+/type export PATH=$PWD/test/fake-ssh/bin:$PATH; export d=$(mktemp -d); echo hi > $d/notes.txt; mkdir $d/sub; mkfile -n 3g $d/big.bin; clear
+/wait 800
+/type ssh -p 2222 me@box
+/wait 1500
+/type clear
+/wait 3500
+/shot remote-1-git-chip.bmp
+/type cd $d; clear; echo notes.txt big.bin sub
+/wait 3500
+/mods cmd
+/move 50 66
+/wait 1200
+/shot remote-2-hover.bmp
+/click 50 66
+/wait 1500
+/shot remote-3-opened.bmp
+/move 106 66
+/wait 1200
+/click 106 66
+/wait 150
+/shot remote-4-modal.bmp
+/mods none
+/key escape
+/wait 500
+/shot remote-5-cancelled.bmp
+/mods cmd
+/move 170 66
+/wait 1200
+/click 170 66
+/wait 800
+/mods none
+/type pwd
+/wait 600
+/shot remote-6-cd.bmp
+/type exit
+/wait 2500
+/type clear; ls -R $TMPDIR/gtty-*/ | grep -c remote-; rm -rf $d
+/wait 800
+/shot remote-7-cleaned.bmp
+/quit
