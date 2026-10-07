@@ -44,13 +44,19 @@ menu.
 In zsh and bash, ⌥/Ctrl + arrows jump words, Shift selects, typing or
 pasting replaces the selection, and Backspace deletes it.
 
-### Files with the mouse
+### Manage files with your mouse
 
 ![Hovering file names outlines them; double-click opens a file or cds into a folder; a held file drags; a dropped file is copied in](docs/images/files.webp)
 
-Hover a file name in the output and it gets an outline. Double-click opens
-the file, or `cd`s into a folder. Hold and drag the file into another
-app, or drop files on a window to copy them into its folder.
+Work with the files and folders in your `ls` output the way you do in
+Finder on a Mac or in the GNOME / KDE file manager. Hover a name and it
+gets an outline:
+
+- **Double-click** opens a file in its app, or `cd`s into a folder.
+- **Right-click** for Open With…, Rename, Copy, Cut, Paste, Move to
+  Trash and Delete (with the usual shortcuts).
+- **Drag** a file into another app, or drop files on a window to copy
+  them into its folder.
 
 ### Type into several terminals at once
 
