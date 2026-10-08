@@ -348,6 +348,13 @@ pub fn pump(w: *JobWindow, gfx: *Gfx) bool {
         const chunk = w.proc.read(.out, &buf) orelse break;
         if (w.log) |*l| l.write(chunk);
         w.out.feed(chunk);
+        // Answers to the program's queries (cursor position, …) go straight
+        // to it: not typing, so neither mirrored nor refused (sync typing).
+        const replies = w.out.takeReplies();
+        if (replies.len > 0) {
+            trace.bytes("to", w.serial, replies);
+            w.proc.write(replies);
+        }
         // A keyboard selection ends where the shell put its cursor.
         if (w.key_sel) if (w.out.sel) |*sel| {
             sel.head = w.cursorPos();

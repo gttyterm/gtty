@@ -848,6 +848,11 @@ decisions; items marked *open* are undecided.
   A memory window (last `max_lines` rows, `--scrollback`); rows that wrapped
   at the edge are flagged so a width change reflows the text. Selection
   lives here too (line positions, adjusted on trim/reflow).
+  Queries are answered (`Screen.query` → `reply_buf`, written to the PTY
+  in `JobWindow.pump`, not through `send`: never mirrored or refused):
+  `ESC[6n` / `ESC[?6n` cursor position, `ESC[5n`, `ESC[c` (VT220 +
+  color). Without them gh's / Go survey prompts hang (fixed 2026-10-08,
+  `test/queries.gt`).
 - `src/core/Tee.zig` — every job's full raw output in
   `$TMPDIR/gtty-<pid>/job-<serial>.log`; deleted with the window / on exit,
   stale folders swept at start. Copy-all rebuilds from it after rows drop.

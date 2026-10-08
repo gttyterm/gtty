@@ -201,6 +201,13 @@ done_status: ?u8 = null,
 /// bash and vim do): a paste is sent wrapped in ESC[200~ … ESC[201~ so it
 /// is taken as text, not typed keys (no line runs on its newline).
 bracketed_paste: bool = false,
+/// Answers to the program's queries (cursor position, device status,
+/// device attributes), for the owner to write back to its PTY
+/// (`takeReplies`). Prompts (gh's, any Go `survey` one, …) ask where the
+/// cursor is and wait for the answer: without it they hang, echoing
+/// nothing.
+reply_buf: [256]u8 = undefined,
+reply_len: usize = 0,
 
 state: State = .ground,
 /// OSC being read: its first bytes, its length, where its ESC was.
@@ -557,7 +564,37 @@ fn privateMode(s: *Screen, final: u8) void {
     };
 }
 
+/// The answers queued since the last call (see `reply_buf`).
+pub fn takeReplies(s: *Screen) []const u8 {
+    const r = s.reply_buf[0..s.reply_len];
+    s.reply_len = 0;
+    return r;
+}
+
+fn reply(s: *Screen, comptime fmt: []const u8, args: anytype) void {
+    const r = std.fmt.bufPrint(s.reply_buf[s.reply_len..], fmt, args) catch return;
+    s.reply_len += r.len;
+}
+
+/// Device status reports (`ESC[5n`, `ESC[6n`, DEC's `ESC[?6n`) and the
+/// primary device attributes (`ESC[c`: a VT220 with color, as xterm says).
+fn query(s: *Screen, final: u8) void {
+    const row = s.cur_row -| s.screenTop() + 1;
+    const col = @as(u32, s.cur_col) + 1;
+    const p0: u32 = if (s.nparams == 0) 0 else s.params[0];
+    switch (s.private) {
+        0 => switch (final) {
+            'n' => if (p0 == 5) s.reply("\x1b[0n", .{}) else if (p0 == 6) s.reply("\x1b[{d};{d}R", .{ row, col }),
+            'c' => if (p0 == 0) s.reply("\x1b[?62;22c", .{}),
+            else => {},
+        },
+        '?' => if (final == 'n' and p0 == 6) s.reply("\x1b[?{d};{d}R", .{ row, col }),
+        else => {},
+    }
+}
+
 fn dispatchCsi(s: *Screen, final: u8) void {
+    if (final == 'n' or final == 'c') return s.query(final);
     if (s.private != 0) return s.privateMode(final);
     const top = s.screenTop();
     switch (final) {
@@ -1554,6 +1591,20 @@ test "zones: prompt, typed command, output" {
     p.feed("hello\r\nhello\r\n");
     try std.testing.expectEqual(Zone.input, p.rowZone(0));
     try std.testing.expectEqual(Zone.output, p.rowZone(1));
+}
+
+test "queries: cursor position, device status and attributes are answered" {
+    var s = Screen.init(std.testing.allocator);
+    defer s.deinit();
+    s.resize(20, 5);
+    s.feed("a\r\nbc\x1b[6n");
+    try std.testing.expectEqualStrings("\x1b[2;3R", s.takeReplies());
+    try std.testing.expectEqualStrings("", s.takeReplies());
+    s.feed("\x1b[5n\x1b[c\x1b[?6n\x1b[>c");
+    try std.testing.expectEqualStrings("\x1b[0n\x1b[?62;22c\x1b[?2;3R", s.takeReplies());
+    // Relative to the live screen, not the scrollback.
+    s.feed("\r\n\r\n\r\n\r\n\r\nx\x1b[6n");
+    try std.testing.expectEqualStrings("\x1b[5;2R", s.takeReplies());
 }
 
 test "typed output: the answer to the last line typed (ssh, no marks)" {

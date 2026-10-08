@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Terminal queries:  zig build run -- --script test/queries.gt
+# A program asks where the cursor is (ESC[6n, as gh's prompts do) and
+# waits for the answer: the window should show "answered 1;1", not
+# "no answer", and the typed name after it.
+/s bash
+/wait 1500
+/type clear; printf '\033[6n'; IFS= read -rs -d R -t 3 r && echo "answered ${r#??}" || echo "no answer"
+/wait 1000
+/type printf '\033[6n'; IFS= read -rs -d R r; read -p "Title for your key: " t; echo "typed: $t"
+/wait 500
+/type my laptop
+/wait 500
+/shot queries.bmp
+/quit
