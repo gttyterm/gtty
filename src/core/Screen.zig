@@ -271,8 +271,16 @@ pub fn lineCount(s: *const Screen) usize {
     return @max(n, s.cur_row + 1);
 }
 
+/// One past the last row of the live screen: the view's bottom when not
+/// scrolled back. Unlike `lineCount` it keeps the empty rows under the
+/// cursor, so a program that moves the cursor up to redraw (docker's
+/// progress, …) doesn't shift the view while it is mid-redraw.
+pub fn viewEnd(s: *const Screen) usize {
+    return @max(s.lines.items.len, s.cur_row + 1);
+}
+
 pub fn scrollBy(s: *Screen, delta: isize) void {
-    const total = s.lineCount();
+    const total = s.viewEnd();
     const max_scroll: usize = if (total > s.rows) total - s.rows else 0;
     const cur: isize = @intCast(s.scroll);
     const next = std.math.clamp(cur + delta, 0, @as(isize, @intCast(max_scroll)));
@@ -287,7 +295,7 @@ pub fn scrollTo(s: *Screen, lines_up: usize) void {
 
 /// Rows the view can scroll up.
 pub fn maxScroll(s: *const Screen) usize {
-    return s.lineCount() -| s.rows;
+    return s.viewEnd() -| s.rows;
 }
 
 // ---------------------------------------------------------------- feeding
@@ -940,9 +948,10 @@ fn repairWide(s: *Screen, row: usize) void {
 }
 
 fn lineFeed(s: *Screen) void {
+    const end = s.viewEnd();
     s.cur_row += 1;
     s.ensureLine(s.cur_row);
-    if (s.scroll > 0) s.scroll += 1; // keep the user's scrolled view stable
+    if (s.scroll > 0) s.scroll += s.viewEnd() - end; // keep the user's scrolled view stable
     s.trim();
 }
 
@@ -1058,7 +1067,7 @@ fn reflow(s: *Screen, new_cols: u16) !void {
         .{ .row = s.saved_row, .col = s.saved_col },
         .{ .row = 0, .col = 0 }, // selection anchor
         .{ .row = 0, .col = 0 }, // selection head
-        .{ .row = (s.lineCount() -| s.scroll) -| s.rows, .col = 0 }, // view top
+        .{ .row = (s.viewEnd() -| s.scroll) -| s.rows, .col = 0 }, // view top
         // The copy-flash rows (out_rows, typed_row, lf_row), at their
         // rows' starts.
         .{ .row = if (s.out_rows) |r| r.start else 0, .col = 0 },
@@ -1190,7 +1199,7 @@ fn reflow(s: *Screen, new_cols: u16) !void {
         sel.anchor = .{ .row = @min(marks[2].row, top), .col = @intCast(@min(marks[2].col, new)) };
         sel.head = .{ .row = @min(marks[3].row, top), .col = @intCast(@min(marks[3].col, new)) };
     }
-    if (s.scroll > 0) s.scroll = (s.lineCount() -| s.rows) -| marks[4].row;
+    if (s.scroll > 0) s.scroll = (s.viewEnd() -| s.rows) -| marks[4].row;
     if (s.out_rows) |*r| {
         r.start = @min(marks[5].row, top + 1);
         if (r.end) |*e| e.* = @min(marks[6].row, top + 1);
@@ -1426,6 +1435,23 @@ test "carriage return overwrite and erase line (progress bars)" {
     const t = try textOf(&s);
     defer std.testing.allocator.free(t);
     try std.testing.expectEqualStrings("100% done", t);
+}
+
+test "a block redrawn in place (docker's progress) keeps the view still" {
+    var s = Screen.init(std.testing.allocator);
+    defer s.deinit();
+    s.resize(20, 5);
+    s.feed("a\r\nb\r\nc\r\nd\r\ne\r\nf\r\n[+] 1\r\n x\r\n");
+    const end = s.viewEnd();
+    // Mid-redraw: the cursor went back up over the block.
+    s.feed("\x1b[1A\x1b[1A\x1b[0G[+] 2");
+    try std.testing.expectEqual(end, s.viewEnd());
+    s.feed("\r\n y\r\n");
+    try std.testing.expectEqual(end, s.viewEnd());
+    // Scrolled back, the redraw doesn't move what the user looks at.
+    s.scrollBy(3);
+    s.feed("\x1b[1A\x1b[1A\x1b[0G[+] 3\r\n z\r\n");
+    try std.testing.expectEqual(@as(usize, 3), s.scroll);
 }
 
 test "osc title is skipped, utf8 decoded, wrap at cols" {

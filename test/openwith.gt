@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The file menu's open row. A file with a default app: "Open with <app>"
+# (its icon; a click opens it), its ▸ box (hover or click) lists the other
+# apps, a line, Other…. No default app: "Open With…", a click asks the
+# system right away, as Other… does (dry: only says so). Run in a scratch folder:
+#   mkdir -p w && cd w && touch data.qqzz notes.txt
+#   GTTY_SHOW_DRY=1 gtty --script $REPO/test/openwith.gt
+# Expect: ow3 "show: would ask which app opens notes.txt", ow5 the same
+# for data.qqzz; ow6 the folder's menu starts "cd Projects and ot…", ow7
+# the shell is in that folder.
+/s bash
+/wait 1500
+/type clear
+/wait 500
+/type LC_ALL=C ls -1
+/wait 800
+# notes.txt: "Open with TextEdit" ▸
+/move 50 102
+/wait 300
+/rclick 50 102
+/wait 300
+/shot ../ow1-menu.bmp
+/move 302 121
+/wait 400
+/shot ../ow2-sub.bmp
+/click 360 478
+/wait 400
+/shot ../ow3-other.bmp
+# data.qqzz: Open With… (no ▸) asks at once
+/move 50 84
+/wait 300
+/rclick 50 84
+/wait 300
+/move 100 96
+/wait 400
+/shot ../ow4-menu-none.bmp
+/click 100 96
+/wait 400
+/shot ../ow5-asked.bmp
+# the folder: cd <name>
+/move 50 66
+/wait 300
+/rclick 50 66
+/wait 300
+/shot ../ow6-folder.bmp
+/click 100 85
+/wait 1000
+/shot ../ow7-cd.bmp
+/quit

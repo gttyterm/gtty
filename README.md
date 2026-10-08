@@ -53,8 +53,10 @@ Finder on a Mac or in the GNOME / KDE file manager. Hover a name and it
 gets an outline:
 
 - **Double-click** opens a file in its app, or `cd`s into a folder.
-- **Right-click** for Open With…, Rename, Copy, Cut, Paste, Move to
-  Trash and Delete (with the usual shortcuts).
+- **Right-click** a file to open it with its app (or pick another one),
+  a folder to `cd` into it or show it in Finder / Files, and either for
+  Rename, Copy, Cut, Paste, Move to Trash and Delete (with the usual
+  shortcuts).
 - **Drag** a file into another app, or drop files on a window to copy
   them into its folder.
 

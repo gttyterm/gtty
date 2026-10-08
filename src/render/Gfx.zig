@@ -258,6 +258,26 @@ fn visibleBox(surf: *c.SDL_Surface) ?c.SDL_FRect {
     return .{ .x = @floatFromInt(x0), .y = @floatFromInt(y0), .w = @floatFromInt(x1 - x0), .h = @floatFromInt(y1 - y0) };
 }
 
+/// A `px`×`px` picture from premultiplied RGBA bytes (an app's icon).
+/// Null: failed. The caller destroys it (SDL_DestroyTexture).
+pub fn imageRgba(g: *Gfx, rgba: []const u8, px: u32) ?*c.SDL_Texture {
+    const n: c_int = @intCast(px);
+    const tex = c.SDL_CreateTexture(g.renderer, c.SDL_PIXELFORMAT_RGBA32, c.SDL_TEXTUREACCESS_STATIC, n, n) orelse return null;
+    if (!c.SDL_UpdateTexture(tex, null, rgba.ptr, n * 4)) {
+        c.SDL_DestroyTexture(tex);
+        return null;
+    }
+    _ = c.SDL_SetTextureBlendMode(tex, c.SDL_BLENDMODE_BLEND_PREMULTIPLIED);
+    _ = c.SDL_SetTextureScaleMode(tex, c.SDL_SCALEMODE_LINEAR);
+    return tex;
+}
+
+/// Draw picture `tex` into `r`.
+pub fn image(g: *Gfx, tex: *c.SDL_Texture, r: Rect) void {
+    const sr = r.sdl();
+    _ = c.SDL_RenderTexture(g.renderer, tex, null, &sr);
+}
+
 pub fn color(g: *Gfx, col: Rgb) void {
     _ = c.SDL_SetRenderDrawColor(g.renderer, col.r, col.g, col.b, 255);
 }

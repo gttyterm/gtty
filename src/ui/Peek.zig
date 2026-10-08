@@ -4,10 +4,13 @@
 //! The peek of a chip (UX doc: "Status bar behavior: chips and peeks"):
 //! the git chip and the folder chip in a job window's footer.
 //!
-//!   * **Folder chip** (`kind` folder): the same box; expanded, the list is
-//!     the folders above the current one (`/` on top, the parent at the
-//!     bottom, next to the chip). Picking one asks App to `cd` there
-//!     (`Action.cd`, the shell at its prompt only).
+//!   * **Folder chip** (`kind` folder): hover or click the chip = the same
+//!     box with the full path; a click on the path copies it, the mouse on
+//!     the expand button (or a click on it) expands it. Expanded, the list is the folders
+//!     above the current one and the current one itself (`/` on top, the
+//!     current folder at the bottom next to the chip, the parent above it,
+//!     selected). Picking one asks App to `cd` there (`Action.cd`, the
+//!     shell at its prompt only).
 //!
 //!   * **Peek:** a plain floating box over the chip, in the normal text
 //!     size: [copy] [expand]  full branch name  [×].
@@ -106,12 +109,17 @@ pub fn open(gpa: std.mem.Allocator, uid: ids.Id, dir: []const u8, full: []const 
     return .{ .gpa = gpa, .uid = uid, .dir = d, .full = try gpa.dupe(u8, full), .anchor = anchor };
 }
 
-/// The folder chip's peek: `dir` in the header, the folders above it in
-/// the list (`/` first, the parent last).
+/// The folder chip's peek: `dir` in the header; in the list the folders
+/// above it (`/` first) and `dir` itself last.
 pub fn openFolder(gpa: std.mem.Allocator, uid: ids.Id, dir: []const u8, anchor: Rect) !Peek {
     var p = try open(gpa, uid, dir, dir, anchor);
     errdefer p.deinit(undefined);
     p.kind = .folder;
+    const self = try gpa.dupe(u8, dir);
+    p.branches.append(gpa, self) catch {
+        gpa.free(self);
+        return error.OutOfMemory;
+    };
     var end = dir.len;
     while (end > 1) {
         const parent = std.fs.path.dirname(dir[0..end]) orelse break;
@@ -185,8 +193,8 @@ fn pick(p: *Peek) Action {
     p.gpa.free(p.target);
     p.target = p.gpa.dupe(u8, name) catch &.{};
     p.state_ms = c.SDL_GetTicks();
-    if (p.kind == .folder) return .cd;
     p.already = std.mem.eql(u8, name, p.full);
+    if (p.kind == .folder and !p.already) return .cd;
     if (p.already) {
         p.state = .ok; // nothing to do
         return .redraw;
@@ -247,12 +255,12 @@ fn refilter(p: *Peek) void {
     }
     p.sel = 0;
     p.top = 0;
-    // Start on the current branch (folders: the parent, next to the chip)
-    // when nothing is typed.
+    // Start on the current branch (folders: the parent, above the current
+    // folder at the bottom) when nothing is typed.
     if (p.filter.items.len == 0) for (p.shown.items, 0..) |i, k| {
         if (std.mem.eql(u8, p.branches.items[i], p.full)) p.sel = k;
     };
-    if (p.kind == .folder and p.filter.items.len == 0) p.sel = p.shown.items.len -| 1;
+    if (p.kind == .folder and p.filter.items.len == 0) p.sel = p.shown.items.len -| 2;
     p.keepSelVisible();
 }
 
@@ -316,12 +324,14 @@ pub fn tick(p: *Peek, now: u64, reaper: *Process.Reaper) enum { none, redraw, cl
 }
 
 /// The mouse moved (anywhere): track the row and button under it, and
-/// start / stop the countdown.
+/// start / stop the countdown. A folder peek expands when the mouse comes
+/// onto its expand button.
 pub fn motion(p: *Peek, x: f32, y: f32, now: u64) bool {
     const inside = p.contains(x, y);
     const was = .{ p.leave_ms != 0, p.hover_row, p.over };
     if (inside) p.leave_ms = 0 else if (p.leave_ms == 0) p.leave_ms = now;
     p.over = if (!inside) .none else if (p.copy_r.contains(x, y)) .copy else if (p.expand_r.contains(x, y)) .expand else if (p.close_r.contains(x, y)) .close else .none;
+    if (p.kind == .folder and p.over == .expand and was[2] != .expand and !p.expanded) p.toggleExpand();
     p.hover_row = p.rowAt(x, y);
     return was[0] != (p.leave_ms != 0) or !std.meta.eql(was[1], p.hover_row) or was[2] != p.over;
 }
@@ -344,6 +354,8 @@ pub fn click(p: *Peek, x: f32, y: f32) Action {
         p.sel = k;
         return p.pick();
     }
+    // The folder peek: a click on the path copies it.
+    if (p.kind == .folder and p.text_r.contains(x, y)) return .copy;
     return .none;
 }
 
@@ -514,7 +526,7 @@ pub fn draw(p: *const Peek, gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, sf: *G
         gfx.clip(p.msg_r);
         switch (p.state) {
             .busy => _ = gfx.text(sf, p.msg_r.x, p.msg_r.y, "switching…", theme.focus),
-            .ok => _ = gfx.text(sf, p.msg_r.x, p.msg_r.y, if (p.kind == .folder) "cd sent" else if (p.already) "already on this branch" else "switched", theme.ok),
+            .ok => _ = gfx.text(sf, p.msg_r.x, p.msg_r.y, if (p.kind == .folder) (if (p.already) "already here" else "cd sent") else if (p.already) "already on this branch" else "switched", theme.ok),
             .err => {
                 var y = p.msg_r.y;
                 var it = std.mem.splitScalar(u8, p.err_msg.items, '\n');
@@ -580,21 +592,43 @@ test "filter keeps git's order, case-insensitive" {
     try t.expectEqualStrings("LO", p.filter.items);
 }
 
-test "folder peek: the folders above, / first, starting on the parent" {
+test "folder peek: the folders above, / first, the current last, starting on the parent" {
     const t = std.testing;
     var p = try Peek.openFolder(t.allocator, 1, "/Users/me/src", .{});
     var reaper: Process.Reaper = .{ .gpa = t.allocator };
     defer reaper.deinit();
     defer p.deinit(&reaper);
-    try t.expectEqual(@as(usize, 3), p.branches.items.len);
+    try t.expectEqual(@as(usize, 4), p.branches.items.len);
     try t.expectEqualStrings("/", p.branches.items[0]);
     try t.expectEqualStrings("/Users", p.branches.items[1]);
     try t.expectEqualStrings("/Users/me", p.branches.items[2]);
+    try t.expectEqualStrings("/Users/me/src", p.branches.items[3]);
     try t.expectEqual(@as(usize, 2), p.sel);
     p.expanded = true;
     try t.expectEqual(Action.cd, p.key(c.SDLK_RETURN));
     try t.expectEqualStrings("/Users/me", p.target);
+    // The current folder: nothing to do.
+    _ = p.key(c.SDLK_DOWN);
+    try t.expectEqual(Action.redraw, p.key(c.SDLK_RETURN));
+    try t.expect(p.already);
     var root = try Peek.openFolder(t.allocator, 1, "/", .{});
     defer root.deinit(&reaper);
-    try t.expectEqual(@as(usize, 0), root.branches.items.len);
+    try t.expectEqual(@as(usize, 1), root.branches.items.len);
+    try t.expectEqual(@as(usize, 0), root.sel);
+}
+
+test "folder peek: the mouse onto the expand button expands it, a click on the path copies" {
+    const t = std.testing;
+    var p = try Peek.openFolder(t.allocator, 1, "/a/b", .{});
+    var reaper: Process.Reaper = .{ .gpa = t.allocator };
+    defer reaper.deinit();
+    defer p.deinit(&reaper);
+    p.box = .{ .x = 0, .y = 0, .w = 100, .h = 20 };
+    p.expand_r = .{ .x = 20, .y = 2, .w = 10, .h = 10 };
+    p.text_r = .{ .x = 40, .y = 0, .w = 40, .h = 20 };
+    _ = p.motion(50, 5, 1);
+    try t.expect(!p.expanded);
+    try t.expectEqual(Action.copy, p.click(50, 5));
+    _ = p.motion(25, 5, 2);
+    try t.expect(p.expanded);
 }

@@ -132,18 +132,23 @@ the shell. Users expect it to behave like a shell in a terminal.
 - **Chips** live in a **footer strip** at the bottom of every job window
   (drawn in the windows area only; a grid copy shows just the text, but
   the strip always takes its room so the PTY size doesn't change). The
+  **folder chip** first (`folder_chip_r`: folder icon + the folder's name,
+  `JobWindow.folderName`; hidden in a remote session), then the
   **git chip** (branch of the folder the window's process is
   in, `gtty_proc_cwd` in `src/sys/gtty_pty.c`: libproc on macOS,
   /proc/<pid>/cwd on Linux; refreshed once a second while shown and
-  running; hidden outside a repo and once the job finished), then the
-  **folder chip** (`folder_chip_r`: folder icon + the folder's name,
-  `JobWindow.folderName`; hidden in a remote session). The exit-code
+  running; always there while the job runs: outside a repo dimmed with
+  the label `git`, `no_git_label`, and no peek — an open one closes;
+  hidden once the job finished; decided 2026-10-08). The exit-code
   badge of a failed window sits in the strip's right end.
   - **Folder chip peek** (`Peek.kind` folder, `Peek.openFolder`,
-    `App.openFolderPeek`): hover = the compact peek (copy, full path);
-    a click opens it expanded at once: the folders above (`/` on top, the
-    parent at the bottom by the chip, selected), filter + keys as the
-    branch list. A pick returns `Action.cd` → `JobWindow.cdTo` when the
+    `App.openFolderPeek`): hover or a click = the peek (copy, full path;
+    a click on the path copies it too, `Peek.click`); the mouse onto its
+    expand button (or a click on it) expands it (`Peek.motion`): the
+    folders above (`/` on top) and
+    the current folder last (green dot, by the chip; picking it = "already
+    here"), the parent above it selected; filter + keys as the branch
+    list (2026-10-08). A pick returns `Action.cd` → `JobWindow.cdTo` when the
     shell is at its prompt (green "cd sent", closes after 1 s; that feeds
     the History ▸ list), else red "the shell is busy" + beep. Closes when
     the folder changes some other way.
@@ -157,15 +162,17 @@ the shell. Users expect it to behave like a shell in a terminal.
     Enter/Esc, wheel; picking runs `git switch` in the background
     (`git.Run`, on a PTY): green border, closes after 1 s; failure: red
     border + git's last lines inside the peek + status notice + beep.
-  - Testing: `/move` onto the chip (about x 45, y 620 at the default size),
-    `/wait 900`; the expand icon is ~25 px right of the copy icon.
+  - Testing: `/move` onto the chip (the folder chip about x 45, y 620 at
+    the default size; the git chip right after it), `/wait 900`; the
+    expand icon is ~25 px right of the copy icon. The real mouse over
+    gtty's window sends its own events and spoils such runs.
 - **File actions** (added 2026-10-07; App "file actions" section) on an
   outlined local name (file or folder), or on the names ⌘-clicked
   (Ctrl-click on Linux; `App.file_sel`: window + text range + path,
   drawn as boxes by `drawFileSel`; a plain click in a window's text
   clears it). Right-click on a name = the file menu (`Menu.Purpose.files`,
   `openFileMenu` / `fileMenuPick`, files in `App.menu_files`): Open /
-  Open With… (files), cd here / Open in Finder (folders), Rename… (F2),
+  Open with <app> / Open With… (files; see below), cd <name> (16 characters, …; `cd_label_max`) / Open in Finder (folders); no title row (it opens at the name), Rename… (F2),
   Copy (⌘C), Cut (⌘X), Paste into X (⌘V; into the folder clicked, else
   the window's folder), Move to Trash (⌘⌫, Linux Ctrl+Delete; only when
   `gtty_trash_supported`), Delete… (⌫ / Delete). **Shortcuts act only
@@ -195,6 +202,27 @@ the shell. Users expect it to behave like a shell in a terminal.
   asked action: FileFx bubble on the window (no flash); cancelled /
   refused: only the status line; `filesChanged` (outlines looked for again).
   Remote names: none of this (normal menu). Tests: `test/fileactions.gt`, `test/fileactions-2.gt`.
+  **Opening: one row** (added 2026-10-08, `loadPicker` → `picker_apps`
+  + `picker_icons` when the menu opens; icons: `gtty_app_icon`, macOS
+  NSWorkspace, Linux none yet; `Row.icon`, `Gfx.imageRgba` / `image`):
+  a default app (`pickerDefault`) → "Open with <app>" + its icon
+  (click = `show`, code `file_open`) and a ▸ box (hover or click opens,
+  `hoverSubMenu`: file menus open their ▸ on hover; another row closes
+  it): the other apps, separator (`Menu.separator`), **Other…**
+  (`Menu.open_with_other`). No default → "Open With…" (no ▸; code
+  `file_open_with`): a click = the system chooser. `Row.hover_sub` (a
+  whole row that only opens a submenu) stays in Menu, unused for now.
+  Other… / Open With… =
+  `App.chooseApp` → `gtty_choose_app` (`src/sys/gtty_appchooser.{m,c}`;
+  macOS: NSOpenPanel sheet in /Applications, Enable Recommended / All
+  Applications (All when nothing is recommended), Always Open With
+  (sets the default for the file's type); gtty opens the file. Linux:
+  portal `OpenURI.OpenFile` with `ask`, libgio via dlopen on a thread;
+  the portal opens the file; untested on a real desktop); the answer
+  is polled in `tickChooser` (notice). `show -a` / ⇧ double-click: the
+  same rows over the prompt (`addPickerRows`, `openWithPick`), no apps
+  → the chooser. `GTTY_SHOW_DRY=1`: "would ask which app opens X".
+  Test: `test/openwith.gt`.
 - **Folder button** (the title bar's folder icon, `JobWindow.files_r`,
   windows area only; `App.openFolder`): the folder the window's program
   is in at the click (`JobWindow.folder`) in the system's file manager
@@ -386,7 +414,7 @@ the shell. Users expect it to behave like a shell in a terminal.
   broken: "(missing)", red) + "click: cd to <folder>"; the box stays
   while the mouse is on it (10 px margin), and `link_grace_ms` (1.5 s,
   `leave_ms`, `tickLinkHover`) after it left the name, so the mouse can
-  reach it (other names on the way don't take over); a click → `cdTo(dirname(target))` when the
+  reach it (other names on the way don't take over); a click → `cdTo(target)` for a folder link, `cdTo(dirname(target))` for a file (or broken) link, when the
   shell is at its prompt, else beep + "the shell is busy". Test:
   `test/names.gt`.
 - **Refresh after a file action** (added 2026-10-07; config
@@ -401,7 +429,7 @@ the shell. Users expect it to behave like a shell in a terminal.
   / la / l / lsd / exa / eza / tree / dir / vdir / gls, no `;|&<>`$()`)
   else `ls`; only at the prompt with nothing typed (`Screen.inputPending`),
   not a read-only window, not remote. A cd gtty types (`JobWindow.cdTo`:
-  link box, folder chip, History ▸, double-click / "cd here" on a
+  link box, folder chip, History ▸, double-click / "cd <name>" on a
   folder) sets `list_after_cd`: when its D mark comes with status 0
   (`Screen.done_status`), the new folder is listed (`listFolder(true)`:
   the last listing command only if it has no names, `optionsOnly`, else
@@ -495,7 +523,10 @@ the shell. Users expect it to behave like a shell in a terminal.
   the longest word-edge span around the mouse that is in a folder's
   listing, `src/ui/DirCache.zig`: last 8 folders, only the names a
   plain run misses, read again when the folder's mtime changes; added
-  2026-10-07, `test/filenames.gt`)
+  2026-10-07, `test/filenames.gt`; the mouse on a blank inside a name
+  works too when the line goes on right of it, 2026-10-08,
+  `test/filenames-blank.gt`; up to 40 word edges each side, a wide
+  character's spacer cell is skipped: `Plug？ [27013].mp4`)
   → resolved against the window's folder → existing regular
   non-executable file → `mark` (text range), drawn dashed by the window
   (`drawFileMark`, windows area only; none while selecting text,
@@ -731,9 +762,9 @@ decisions; items marked *open* are undecided.
   q 80; `GTTY_DEMO_QUALITY`). Sizes: hero 1200×520, the rest 1200×760.
   Needs a display (the window shows while it records; keep the mouse off
   it) and overwrites the clipboard. After UI changes, check the
-  coordinates in the scripts (title-bar copy ~25,24; chips y ~646 and the
-  branch peek's expand ~52,638 at 1200×760; the folder chip moves right
-  when the branch name is longer). The README shows no AI (not ready).
+  coordinates in the scripts (title-bar copy ~25,24; chips y ~646: the
+  folder chip ~45, its peek's expand ~52,638 at 1200×760; the git chip
+  moves right when the folder name is longer). The README shows no AI (not ready).
 - Color test lines: use `\033`, not `\e` — macOS `/bin/bash` is 3.2 and its
   `echo -e` doesn't know `\e`. E.g. `/s bash` then
   `/type echo -e "\033[31mred \033[1;31mbold\033[0m"`; `/click` on the color

@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Folder and link names in plain output: folders blue, links with a dash
 # of pink; ls -G (colors) left alone. Hover a link: a box with its target;
-# a click on the box cd's to the folder the target is in. Run in a
+# a click on the box cd's into a linked folder, or to the folder a
+# linked file is in. Run in a
 # scratch folder:
 #   mkdir -p w/sub w/'My Dir' other/deep && cd w && touch notes.txt
 #   ln -s notes.txt link-file && ln -s sub link-dir && ln -s ../other/deep far
 #   gtty --script $REPO/test/names.gt
 # Expect: n1 blue My Dir / sub, pink-tinted links, ls -G untouched; n2 the
-# box over far ("→ …/other/deep", "click: cd to other"); n3 pwd = other.
+# box over far ("→ …/other/deep", "click: cd to deep"); n3 pwd = other/deep.
 /s bash
 /wait 1500
 /type clear

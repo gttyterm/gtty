@@ -951,13 +951,17 @@ pub fn footHeight(gfx: *Gfx, scale: Scale) f32 {
     return @round(f.cell_h + 8 * scale.ui);
 }
 
+/// The git chip's text outside a git repo (dimmed, no peek).
+const no_git_label = "git";
+
 /// Longest branch name shown on the chip; the peek shows all of it.
 const chip_max_chars = 32;
 
 /// The chips, left in the footer, shown in the windows area while the job
-/// runs: the git chip inside a git repo, then the folder chip (the
-/// folder's name; not in a remote session, where the local folder means
-/// nothing).
+/// runs: the folder chip first (the folder's name; not in a remote
+/// session, where the local folder means nothing), then the git chip,
+/// always there: the branch inside a git repo, else dimmed (`no_git_label`,
+/// no peek).
 fn layoutChips(w: *JobWindow, gfx: *Gfx) void {
     w.git_chip_r = .{};
     w.folder_chip_r = .{};
@@ -968,13 +972,11 @@ fn layoutChips(w: *JobWindow, gfx: *Gfx) void {
     const h = r.h - @round(3 * ui);
     const y = r.y + @round(r.h - h - @round(1 * ui));
     var x = r.x + @round(6 * ui);
-    if (w.branch()) |b| {
-        w.git_chip_r = .{ .x = x, .y = y, .w = chipWidth(f, ui, b), .h = h };
-        x += w.git_chip_r.w + @round(6 * ui);
-    }
     if (w.remote_len == 0) if (w.folderName()) |name| {
         w.folder_chip_r = .{ .x = x, .y = y, .w = chipWidth(f, ui, name), .h = h };
+        x += w.folder_chip_r.w + @round(6 * ui);
     };
+    w.git_chip_r = .{ .x = x, .y = y, .w = chipWidth(f, ui, w.branch() orelse no_git_label), .h = h };
 }
 
 fn chipWidth(f: *const Gfx.Face, ui: f32, label: []const u8) f32 {
@@ -1574,7 +1576,7 @@ pub fn scrollAt(w: *JobWindow, lines: isize) void {
 
 /// Absolute line index of the top visible row.
 fn viewTop(w: *const JobWindow) usize {
-    return (w.out.lineCount() -| w.out.scroll) -| w.out.rows;
+    return (w.out.viewEnd() -| w.out.scroll) -| w.out.rows;
 }
 
 fn viewRow(w: *const JobWindow, y: f32) u16 {
@@ -2010,27 +2012,30 @@ fn drawFooter(w: *const JobWindow, gfx: *Gfx, theme: *const Theme) void {
     gfx.fill(r, theme.bg.mix(theme.title_bg, 0.35));
     gfx.fill(.{ .x = r.x, .y = r.y, .w = r.w, .h = @max(@round(ui), 1) }, theme.title_bg);
     const f = chipFace(gfx, w.scale) catch return;
-    if (w.branch()) |b| if (w.git_chip_r.w > 0)
-        drawChip(gfx, theme, f, ui, w.git_chip_r, b, w.over_git_chip or w.git_peek_open, .git);
+    if (w.git_chip_r.w > 0) {
+        const b = w.branch();
+        drawChip(gfx, theme, f, ui, w.git_chip_r, b orelse no_git_label, b != null and (w.over_git_chip or w.git_peek_open), .git, b != null);
+    }
     if (w.folderName()) |name| if (w.folder_chip_r.w > 0)
-        drawChip(gfx, theme, f, ui, w.folder_chip_r, name, w.over_folder_chip or w.folder_peek_open, .folder);
+        drawChip(gfx, theme, f, ui, w.folder_chip_r, name, w.over_folder_chip or w.folder_peek_open, .folder, true);
 }
 
 /// A chip: its icon and label (cut with … when long); lighter while the
-/// mouse is on it or its peek is open.
-fn drawChip(gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, ui: f32, cr: Rect, label: []const u8, lit: bool, icon: enum { git, folder }) void {
-    gfx.fill(cr, theme.title_bg.mix(theme.fg, if (lit) 0.16 else 0.06));
+/// mouse is on it or its peek is open; dimmed when disabled.
+fn drawChip(gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, ui: f32, cr: Rect, label: []const u8, lit: bool, icon: enum { git, folder }, enabled: bool) void {
+    gfx.fill(cr, theme.title_bg.mix(theme.fg, if (lit) 0.16 else if (enabled) 0.06 else 0.02));
+    const icon_col = if (enabled) theme.focus else theme.dim;
     const pad = @round(7 * ui);
     const iy = cr.y + @round((cr.h - f.cell_h) / 2);
     const iw = @round(f.cell_h * 0.8);
     switch (icon) {
-        .git => gitIcon(gfx, theme.focus, ui, cr.x + pad, iy, iw, f.cell_h),
-        .folder => folderIcon(gfx, theme.focus, ui, cr.x + pad, iy, iw, f.cell_h),
+        .git => gitIcon(gfx, icon_col, ui, cr.x + pad, iy, iw, f.cell_h),
+        .folder => folderIcon(gfx, icon_col, ui, cr.x + pad, iy, iw, f.cell_h),
     }
     const tx = cr.x + pad + chipIconW(f, ui);
     const ty = cr.y + @round((cr.h - f.cell_h) / 2);
     const cut = chipCut(label);
-    const end = gfx.text(f, tx, ty, label[0..cut], theme.title_fg);
+    const end = gfx.text(f, tx, ty, label[0..cut], if (enabled) theme.title_fg else theme.dim);
     if (cut < label.len) _ = gfx.text(f, end, ty, "…", theme.dim);
 }
 
@@ -2119,7 +2124,7 @@ fn drawMarks(w: *const JobWindow, gfx: *Gfx, theme: *const Theme) void {
 /// rows sit in the scrollback, sized by the share of lines in view. Null
 /// while all the output fits.
 fn scrollThumb(w: *const JobWindow) ?struct { y: f32, h: f32 } {
-    const total = w.out.lineCount();
+    const total = w.out.viewEnd();
     if (total <= w.out.rows) return null;
     const r = w.scroller_r;
     const n: f32 = @floatFromInt(total);
@@ -2391,7 +2396,7 @@ fn drawPane(gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, s: *Screen, r: Rect, p
     defer gfx.clip(null);
 
     const rows: usize = s.rows;
-    const total = s.lineCount();
+    const total = s.viewEnd();
     const end = total -| s.scroll;
     const start = end -| rows;
 

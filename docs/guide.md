@@ -38,10 +38,10 @@ In the picture above:
 
 ## Chips: git branch and folder
 
-The strip along the bottom of a window holds its **chips**. A window
-whose program runs inside a git repository shows the **branch** first. It follows the folder the program is
-in, so after `cd` in a shell it shows that folder's branch (and disappears
-outside a repository).
+The strip along the bottom of a window holds its **chips**: the **folder**
+first, then the **branch**. The branch chip follows the folder the program
+is in, so after `cd` in a shell it shows that folder's branch; outside a git
+repository it stays there, dimmed, and does nothing.
 
 - **Hover** the chip (or click it): a box with the full branch name, a
   **copy** button and an **expand** button (^).
@@ -55,15 +55,17 @@ outside a repository).
 
 Your shell's own prompt shows the new branch after your next Enter.
 
-Next to it, the **folder chip** shows the name of the folder the window's
-program is in (not in an ssh session).
+The **folder chip** shows the name of the folder the window's program is
+in (not in an ssh session).
 
-- **Hover** it: the full path and a **copy** button.
-- **Click** it: the folders above this one, `/` on top and the parent
-  folder at the bottom, already chosen. Type to filter, ↑/↓ to choose,
-  **Enter** (or a click) `cd`s the shell there. This works while the shell
-  waits for your input; while a command runs, the box says the shell is
-  busy.
+- **Hover** or **click** it: the full path. A click on the path (or the
+  **copy** button) copies it.
+- Move onto the **expand** button (^), or click it: the folders
+  above this one, `/` on top and the current folder at the bottom (marked
+  green), with the parent folder above it already chosen. Type to filter,
+  ↑/↓ to choose, **Enter** (or a click) `cd`s the shell there. This works
+  while the shell waits for your input; while a command runs, the box says
+  the shell is busy.
 
 Every window has a number (`#4`) so you can tell them apart. Click any window
 in either grid to bring it into the middle; the one that was there moves to
@@ -232,8 +234,9 @@ Turn it off (and on) in Settings… → General → "Folder names in blue
 
 **Hover a link** for a moment: a small box above it shows where it
 points (→ the real path). It stays a moment after the mouse leaves the
-name, so you can move onto it; **click the box** to `cd` to the folder
-the target is in (the shell must be waiting at its prompt).
+name, so you can move onto it; **click the box** to `cd` there: into
+the folder a link to a folder points to, or to the folder a linked file
+is in (the shell must be waiting at its prompt).
 
 ### Opening files from the output
 
@@ -271,9 +274,19 @@ Settings… → General → "File names: mark on hover, double-click opens".
 ### Working with files
 
 **Right-click** an outlined file or folder name for what you can do with
-it: **Open** / **Open With…** (a folder: **cd here**, **Open in
-Finder**), **Rename…**, **Copy**, **Cut**, **Paste into …**, **Move to
-Trash** (where the system has a trash) and **Delete…**.
+it: **Open with <app>** / **Open With…** (a folder: **cd <its name>**,
+**Open in Finder**, on Linux **Open in Files**), **Rename…**, **Copy**, **Cut**, **Paste into …**, **Move
+to Trash** (where the system has a trash) and **Delete…**.
+
+Opening a file takes one row. When the file has a default app, the row
+is **Open with <that app>**, with the app's icon: click it to open the
+file. Its **▸** (rest the mouse on it, or click it) lists the other apps
+that can open the file, then **Other…**. When the file has no default
+app, the row is **Open With…**. **Open With…** and **Other…** open the
+system's own "choose an application" dialog (macOS: as Finder's,
+with Recommended / All Applications and Always Open With; Linux: GNOME's
+or KDE's, through the desktop portal). Shift + double-click and `show
+-a` list the apps over the prompt.
 
 The same with keys, while the mouse is on the name (move the mouse onto
 it after typing: keys you type with the pointer just resting on a name

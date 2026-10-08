@@ -172,11 +172,19 @@ sub_labels: [JobWindow.folder_history_max][folder_label_max * 4 + 4]u8 = undefin
 /// This session's copies from job windows, newest first (the right-click
 /// menu's Paste ▸).
 paste_history: std.ArrayList([]u8) = .empty,
-/// `show`'s app picker, while open: the file and the apps that can open
-/// it (the menu's rows, in order).
+/// `show`'s app picker or the file menu's Open With ▸, while open: the
+/// file and the apps that can open it (row code k = app k).
 picker_path: ?[:0]u8 = null,
 picker_apps: []c.gtty_app = &.{},
+/// Their icons (macOS), as the menu rows show them.
+picker_icons: []?*c.SDL_Texture = &.{},
+/// The file menu's "Open with <default app>".
+open_label: [300]u8 = undefined,
 picker_title: [300]u8 = undefined,
+/// The file the system's app chooser was opened for (its name, for the
+/// answer's notice).
+chooser_file: [256]u8 = undefined,
+chooser_file_len: usize = 0,
 msg_buf: [512]u8 = undefined,
 msg_len: usize = 0,
 msg_color: Rgb = .{ .r = 0, .g = 0, .b = 0 },
@@ -270,7 +278,8 @@ menu_dest: ?[:0]u8 = null,
 menu_anchor: ?Rect = null,
 /// The name the file menu is for (Copy / Cut flash it).
 menu_range: ?Screen.TextRange = null,
-menu_title: [64]u8 = undefined,
+/// The file menu's "cd <folder>" label.
+menu_cd_label: [cd_label_max * 4 + 8]u8 = undefined,
 menu_paste_label: [64]u8 = undefined,
 menu_paste_buf: [256]u8 = undefined,
 /// The next `JobWindow.file_fx` id (FileFx: what a mouse action did to a
@@ -535,6 +544,7 @@ pub fn run(app: *App) void {
         app.tickInsideDrop();
         app.tickFilePress();
         app.tickCopies();
+        app.tickChooser();
         app.tickDragOut();
         app.tickModal();
         app.tickPeek();
@@ -1695,7 +1705,7 @@ fn closeMenu(app: *App) void {
     const m = app.menu orelse return;
     app.menu = null;
     app.sub_menu = null;
-    if (m.purpose == .open_with) app.freePicker();
+    app.freePicker(); // the picker's, or the file menu's Open With ▸
     if (m.purpose == .files) app.freeMenuFiles();
     app.dirty = true;
 }
@@ -1708,6 +1718,17 @@ fn toggleSubMenu(app: *App, row: usize) void {
     const was_open = app.sub_menu != null and app.sub_row == row;
     app.sub_menu = null;
     if (was_open or !m.rows[row].sub_on) return;
+    const f, _ = app.promptFaces();
+    const bounds: Rect = .{ .x = 0, .y = 0, .w = app.width_px, .h = app.height_px };
+    if (m.purpose == .files) {
+        // "Open with <default>" ▸: the other apps, Other….
+        var sub: Menu = .{ .purpose = .open_with, .at = .{ 0, 0 } };
+        app.addPickerRows(&sub, true);
+        app.sub_row = row;
+        sub.layoutBeside(f, app.scale.ui, bounds, &m, row);
+        app.sub_menu = sub;
+        return;
+    }
     const target = switch (m.purpose) {
         .edit => |t| t,
         else => return,
@@ -1728,9 +1749,24 @@ fn toggleSubMenu(app: *App, row: usize) void {
         for (app.paste_history.items, 0..) |t, i| sub.add(.{ .label = Menu.oneLine(&app.sub_labels[i], t, paste_label_max) });
     }
     app.sub_row = row;
-    const f, _ = app.promptFaces();
-    sub.layout(f, app.scale.ui, .{ .x = 0, .y = 0, .w = app.width_px, .h = app.height_px });
+    sub.layoutBeside(f, app.scale.ui, bounds, &m, row);
     app.sub_menu = sub;
+}
+
+/// The mouse moved in the menu: a row that only opens a submenu (Open
+/// With… ▸), or a file menu row's ▸ box, opens it; moving onto another
+/// row closes such a submenu.
+fn hoverSubMenu(app: *App) void {
+    const m = app.menu orelse return;
+    const i = m.over orelse return;
+    const open_here = app.sub_menu != null and app.sub_row == i;
+    const files = m.purpose == .files;
+    if (m.rows[i].hover_sub or (files and m.over_arrow)) {
+        if (!open_here) app.toggleSubMenu(i);
+    } else if (app.sub_menu != null and app.sub_row != i and app.sub_row < m.n and (files or m.rows[app.sub_row].hover_sub)) {
+        app.sub_menu = null;
+        app.dirty = true;
+    }
 }
 
 /// A left click inside the open menu: act on an enabled row and close;
@@ -1738,20 +1774,25 @@ fn toggleSubMenu(app: *App, row: usize) void {
 /// paste history.
 fn menuClick(app: *App, x: f32, y: f32) void {
     const m = app.menu orelse return;
-    if (m.arrowAt(x, y)) |row| return app.toggleSubMenu(row);
+    if (m.arrowAt(x, y)) |row| {
+        // The file menu's ▸ opened on hover: a click keeps it.
+        if (m.purpose == .files and app.sub_menu != null and app.sub_row == row) return;
+        return app.toggleSubMenu(row);
+    }
     const row = m.rowAt(x, y) orelse return;
     if (!m.isEnabled(row)) return;
+    // A row that only opens a submenu: open it (a click doesn't close it).
+    if (m.rows[row].hover_sub) {
+        if (!(app.sub_menu != null and app.sub_row == row)) app.toggleSubMenu(row);
+        return;
+    }
     switch (m.purpose) {
         .bar => {
             const code = m.codes[row];
             app.closeMenu();
             app.menuPick(code);
         },
-        .open_with => {
-            // The picker's data is freed with the menu: open first.
-            if (app.picker_path) |path| if (row < app.picker_apps.len) app.openWith(path, &app.picker_apps[row]);
-            app.closeMenu();
-        },
+        .open_with => app.openWithPick(m.codes[row]),
         .edit => |target| {
             app.closeMenu();
             const job: ?*JobWindow = switch (target) {
@@ -1812,6 +1853,7 @@ fn subMenuClick(app: *App, x: f32, y: f32) void {
     if (!sm.isEnabled(row)) return;
     const target = switch (sm.purpose) {
         .paste_history => |t| t,
+        .open_with => return app.openWithPick(sm.codes[row]),
         .folder_history => |uid| {
             const w = app.jobByUid(uid) orelse return app.closeMenu();
             app.closeMenu();
@@ -2132,7 +2174,8 @@ fn openFolder(app: *App, w: *JobWindow) void {
 // ------------------------------------------------------------ show
 
 /// `show <file>`: open the file with its default app, or let the user pick
-/// the app (`-a`, or when the file has no default app). No job window.
+/// the app (`-a`, or when the file has no default app: the app picker,
+/// else the system's app chooser). No job window.
 /// A relative path is taken from gtty's folder; `~` is the home folder.
 fn showFile(app: *App, path_in: []const u8, pick: bool) void {
     var buf: [4096]u8 = undefined;
@@ -2163,27 +2206,18 @@ fn expandHome(buf: []u8, path: []const u8) ?[:0]const u8 {
 }
 
 /// The app picker for `path`: a menu over the prompt listing the apps
-/// that can open it (the default one first, marked).
+/// that can open it (the default one first, marked), then Other…; no app
+/// known: the system's app chooser at once.
 fn openPicker(app: *App, path: [:0]const u8) void {
-    var apps: [Menu.max_rows]c.gtty_app = undefined;
-    const n: usize = @intCast(@max(c.gtty_open_apps(path.ptr, &apps, apps.len), 0));
     const base = std.fs.path.basename(path);
-    if (n == 0) {
-        beep.beep();
-        return app.sayFmt("show: no app can open {s}", .{base}, app.theme.stderr_accent);
-    }
     app.closeMenu();
-    app.picker_path = app.gpa.dupeZ(u8, path) catch return;
-    app.picker_apps = app.gpa.dupe(c.gtty_app, apps[0..n]) catch {
+    if (!app.loadPicker(path)) {
         app.freePicker();
-        return;
-    };
+        return app.chooseApp(path);
+    }
     var m: Menu = .{ .purpose = .open_with, .at = .{ app.prompt.rect.x, app.prompt.rect.y } };
     m.title = std.fmt.bufPrint(&app.picker_title, "Open {s} with", .{base}) catch "Open with";
-    for (app.picker_apps) |*a| m.add(.{
-        .label = std.mem.sliceTo(&a.name, 0),
-        .key = if (a.is_default != 0) "default" else "",
-    });
+    app.addPickerRows(&m, false);
     app.popMenu(m);
     // Its bottom on the prompt's top (the size is known once laid out).
     if (app.menu) |*pm| {
@@ -2193,11 +2227,110 @@ fn openPicker(app: *App, path: [:0]const u8) void {
     }
 }
 
+/// Fill `picker_path` / `picker_apps` / `picker_icons` with the apps
+/// that can open `path` (the default one first; room left for the
+/// separators and Other…). False: no app known (`picker_path` is set
+/// all the same, for Other…).
+fn loadPicker(app: *App, path: [:0]const u8) bool {
+    app.freePicker();
+    app.picker_path = app.gpa.dupeZ(u8, path) catch return false;
+    var apps: [Menu.max_rows - 3]c.gtty_app = undefined;
+    const n: usize = @intCast(@max(c.gtty_open_apps(path.ptr, &apps, apps.len), 0));
+    if (n == 0) return false;
+    app.picker_apps = app.gpa.dupe(c.gtty_app, apps[0..n]) catch return false;
+    app.picker_icons = app.gpa.alloc(?*c.SDL_Texture, n) catch {
+        app.freePicker();
+        return false;
+    };
+    @memset(app.picker_icons, null);
+    const f, _ = app.promptFaces();
+    const px = Menu.iconPx(f);
+    const rgba = app.gpa.alloc(u8, px * px * 4) catch return true;
+    defer app.gpa.free(rgba);
+    for (app.picker_apps, app.picker_icons) |*a, *icon| {
+        if (c.gtty_app_icon(@ptrCast(&a.id), @intCast(px), rgba.ptr) == 1) icon.* = app.gfx.imageRgba(rgba, px);
+    }
+    return true;
+}
+
+/// The default app of the loaded picker, if the file has one.
+fn pickerDefault(app: *App) ?usize {
+    return if (app.picker_apps.len > 0 and app.picker_apps[0].is_default != 0) 0 else null;
+}
+
+/// The picker's rows (row code k = `picker_apps[k]`), then a line and
+/// Other…. With the default app: it first and a line after it, or left
+/// out (`skip_default`: the file menu's "Open with <it>" row is it).
+fn addPickerRows(app: *App, m: *Menu, skip_default: bool) void {
+    for (app.picker_apps, app.picker_icons, 0..) |*a, icon, k| {
+        const def = a.is_default != 0;
+        if (def and skip_default) continue;
+        m.addCode(.{ .label = std.mem.sliceTo(&a.name, 0), .key = if (def) "default" else "", .icon = icon }, @intCast(k));
+        if (def and k + 1 < app.picker_apps.len) m.add(Menu.separator);
+    }
+    if (m.n > 0) m.add(Menu.separator);
+    m.addCode(.{ .label = "Other…" }, Menu.open_with_other);
+}
+
+/// A row of the app picker (or of Open With ▸) was picked: open the file
+/// with that app, or ask the system (Other…). Closes the menu.
+fn openWithPick(app: *App, code: i32) void {
+    // The picker's data is freed with the menu: act first.
+    if (app.picker_path) |path| {
+        if (code == Menu.open_with_other) {
+            app.chooseApp(path);
+        } else if (code >= 0 and code < app.picker_apps.len) {
+            app.openWith(path, &app.picker_apps[@intCast(code)]);
+        }
+    }
+    app.closeMenu();
+}
+
+/// The system's choose-an-app dialog for `path` (macOS: a sheet on
+/// gtty's window as Finder's Other…; Linux: the desktop portal's app
+/// chooser). The answer arrives in `tickChooser`. `GTTY_SHOW_DRY=1` only
+/// says it.
+fn chooseApp(app: *App, path: [:0]const u8) void {
+    const base = std.fs.path.basename(path);
+    if (c.getenv("GTTY_SHOW_DRY") != null)
+        return app.sayFmt("show: would ask which app opens {s}", .{base}, app.theme.dim);
+    var why: [256]u8 = undefined;
+    if (c.gtty_choose_app(app.window, path.ptr, &why, why.len) == 0) {
+        beep.beep();
+        return app.sayFmt("{s}", .{std.mem.sliceTo(&why, 0)}, app.theme.stderr_accent);
+    }
+    const n = @min(base.len, app.chooser_file.len);
+    @memcpy(app.chooser_file[0..n], base[0..n]);
+    app.chooser_file_len = n;
+    app.sayFmt("choose the app that opens {s}", .{base}, app.theme.dim);
+}
+
+/// The app chooser's answer, once it has one.
+fn tickChooser(app: *App) void {
+    var text: [512]u8 = undefined;
+    const r = c.gtty_choose_app_take(&text, text.len);
+    if (r == 0) return;
+    const base = app.chooser_file[0..app.chooser_file_len];
+    const t = std.mem.sliceTo(&text, 0);
+    switch (r) {
+        1 => app.sayFmt("opened {s} with {s}", .{ base, t }, app.theme.dim),
+        2 => app.say("nothing opened", app.theme.dim),
+        3 => {}, // the system opens it
+        else => {
+            beep.beep();
+            app.sayFmt("could not open {s}: {s}", .{ base, t }, app.theme.stderr_accent);
+        },
+    }
+}
+
 fn freePicker(app: *App) void {
     if (app.picker_path) |p| app.gpa.free(p);
     app.picker_path = null;
     app.gpa.free(app.picker_apps);
     app.picker_apps = &.{};
+    for (app.picker_icons) |icon| if (icon) |t| c.SDL_DestroyTexture(t);
+    app.gpa.free(app.picker_icons);
+    app.picker_icons = &.{};
 }
 
 /// A row of the app picker was picked.
@@ -2240,24 +2373,16 @@ fn peekChip(w: *const JobWindow, kind: Peek.Kind) Gfx.Rect {
     };
 }
 
-/// Open the peek of window `i`'s folder chip (closing any other peek);
-/// `expanded` (a click): straight into the list of folders above.
-fn openFolderPeek(app: *App, i: usize, expanded: bool) void {
+/// Open the peek of window `i`'s folder chip (hover or click; closing any
+/// other peek): the full path; its expand button grows it into the list.
+fn openFolderPeek(app: *App, i: usize) void {
     const w = app.jobs.items[i];
     if (w.cwd().len == 0) return;
-    if (app.peek) |*pk| if (pk.uid == w.uid and pk.kind == .folder) {
-        if (expanded and !pk.expanded) {
-            pk.expanded = true;
-            app.layoutPeek();
-            app.dirty = true;
-        }
-        return;
-    };
+    if (app.peek) |pk| if (pk.uid == w.uid and pk.kind == .folder) return;
     app.closePeek();
     app.hideTip();
     app.chip_hover = null;
     app.peek = Peek.openFolder(app.gpa, w.uid, w.cwd(), w.folder_chip_r) catch return;
-    app.peek.?.expanded = expanded;
     w.folder_peek_open = true;
     app.layoutPeek();
     app.dirty = true;
@@ -2333,7 +2458,7 @@ fn tickPeek(app: *App) void {
     if (app.chip_hover) |h| if (now -| h.since >= app.chip_hover_ms) {
         app.chip_hover = null;
         for (app.jobs.items, 0..) |w, i| if (w.uid == h.uid) {
-            if (h.hit == .folder_chip) app.openFolderPeek(i, false) else app.openGitPeek(i);
+            if (h.hit == .folder_chip) app.openFolderPeek(i) else app.openGitPeek(i);
         };
     };
     if (app.peek == null) return;
@@ -2344,7 +2469,8 @@ fn tickPeek(app: *App) void {
         app.dirty = true;
     }
     switch (pk.kind) {
-        .git => if (pk.state != .busy) if (w.branch()) |b| pk.setFull(b),
+        // Out of the repo: the chip is disabled, its peek goes.
+        .git => if (pk.state != .busy) if (w.branch()) |b| pk.setFull(b) else return app.closePeek(),
         // The shell went elsewhere (not by this peek): its list is stale.
         .folder => if (pk.state == .idle and !std.mem.eql(u8, w.cwd(), pk.full)) return app.closePeek(),
     }
@@ -3617,7 +3743,7 @@ fn clickJob(app: *App, i: usize, x: f32, y: f32, button: u8, clicks: u8) void {
         // The git chip: its peek at once (no focus change).
         .git_chip => app.openGitPeek(i),
         // The folder chip: the folders above, at once.
-        .folder_chip => app.openFolderPeek(i, true),
+        .folder_chip => app.openFolderPeek(i),
         .minimize => app.minimizeJob(i),
         .maximize => app.toggleMaximize(i),
         // Anywhere else: the job becomes (or stays) the current job window.
@@ -3671,6 +3797,7 @@ fn onMotion(app: *App, x: f32, y: f32) void {
     app.updateLinkHover(x, y, in_menu);
     if (app.menu) |*m| if (m.motion(x, y)) {
         app.dirty = true;
+        app.hoverSubMenu();
     };
     if (app.sub_menu) |*m| if (m.motion(x, y)) {
         app.dirty = true;
@@ -4398,6 +4525,8 @@ const FileSel = struct {
 };
 
 /// The right-click file menu's rows (`Menu.codes`).
+/// The file menu's "cd <folder>": at most this many characters of the name.
+const cd_label_max = 16;
 const file_open = 0;
 const file_open_with = 1;
 const file_cd = 2;
@@ -4819,14 +4948,26 @@ fn openFileMenu(app: *App, x: f32, y: f32) bool {
     const one = paths.len == 1;
     const folder = one and FileOpener.kindOf(paths[0]) == .folder;
     var menu: Menu = .{ .purpose = .{ .files = w.uid }, .at = .{ x, y } };
-    var tbuf: [64]u8 = undefined;
-    menu.title = Menu.oneLine(&app.menu_title, whatPaths(paths, &tbuf), 40);
+    // No title: the menu opens at the name it is about.
     if (one and !folder) {
-        menu.addCode(.{ .label = "Open", .key = "double-click" }, file_open);
-        menu.addCode(.{ .label = "Open With…", .key = "⇧ double-click" }, file_open_with);
+        // One row: "Open with <default app>" (its icon; ▸ the other apps
+        // and Other…), or, with no default app, "Open With…" (a click:
+        // the system's app chooser).
+        _ = app.loadPicker(paths[0]);
+        if (app.pickerDefault()) |d| {
+            const a = &app.picker_apps[d];
+            const label = std.fmt.bufPrint(&app.open_label, "Open with {s}", .{std.mem.sliceTo(&a.name, 0)}) catch "Open";
+            menu.addCode(.{ .label = label, .icon = app.picker_icons[d], .sub = true, .sub_on = true }, file_open);
+        } else {
+            menu.addCode(.{ .label = "Open With…" }, file_open_with);
+        }
     }
     if (folder) {
-        menu.addCode(.{ .label = "cd here", .key = "double-click", .enabled = w.atPrompt() and w.sync != .follower }, file_cd);
+        // "cd <the folder's name>", a long name cut with ….
+        var nbuf: [cd_label_max * 4 + 4]u8 = undefined;
+        const name = Menu.oneLine(&nbuf, std.fs.path.basename(paths[0]), cd_label_max);
+        const label = std.fmt.bufPrint(&app.menu_cd_label, "cd {s}", .{name}) catch "cd";
+        menu.addCode(.{ .label = label, .enabled = w.atPrompt() and w.sync != .follower }, file_cd);
         menu.addCode(.{ .label = if (builtin.os.tag == .macos) "Open in Finder" else "Open in Files" }, file_reveal);
     }
     menu.addCode(.{ .label = "Rename…", .key = "F2", .enabled = one }, file_rename);
@@ -4856,9 +4997,14 @@ fn fileMenuPick(app: *App, uid: ids_mod.Id, code: i32) void {
     app.menu_files = null; // taken over here
     const w = app.jobByUid(uid) orelse return app.freePaths(paths);
     switch (code) {
-        file_open, file_open_with => {
+        file_open => {
             defer app.freePaths(paths);
-            app.execGtty(.{ .show = .{ .path = paths[0], .pick = code == file_open_with } });
+            app.execGtty(.{ .show = .{ .path = paths[0], .pick = false } });
+        },
+        // No default app: the system's app chooser.
+        file_open_with => {
+            defer app.freePaths(paths);
+            app.chooseApp(paths[0]);
         },
         file_cd => {
             defer app.freePaths(paths);
@@ -5200,8 +5346,10 @@ const LinkHover = struct {
         return h.target[0..h.target_len];
     }
 
-    /// The folder a click cd's to: the one the target is in.
+    /// The folder a click cd's to: the target itself when it is a
+    /// folder, else the one the target is in.
     fn cdDir(h: *const LinkHover) []const u8 {
+        if (h.folder and !h.broken) return h.targetPath();
         return std.fs.path.dirname(h.targetPath()) orelse "/";
     }
 };
