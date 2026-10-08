@@ -275,8 +275,13 @@ Settings… → General → "File names: mark on hover, double-click opens".
 
 **Right-click** an outlined file or folder name for what you can do with
 it: **Open with <app>** / **Open With…** (a folder: **cd <its name>**,
-**Open in Finder**, on Linux **Open in Files**), **Rename…**, **Copy**, **Cut**, **Paste into …**, **Move
-to Trash** (where the system has a trash) and **Delete…**.
+**Open in Finder**, on Linux **Open in Files**), **Rename…**, **Copy**,
+**Copy Name**, **Cut**, **Paste**, **Move to Trash** (where the system has
+a trash) and **Delete…**.
+
+**A single click** on an outlined name copies its name as text (the name
+flashes), ready to paste into a command line; **Copy Name** in the menu
+does the same.
 
 Opening a file takes one row. When the file has a default app, the row
 is **Open with <that app>**, with the app's icon: click it to open the
@@ -304,10 +309,12 @@ still go to the shell):
 (a box marks each; ⌘-click again to take one out, a plain click clears),
 then use a key or right-click one of them.
 
-Copied or cut files wait on gtty's own file clipboard (not the system's:
-the window menu's plain **Paste** still pastes text). While they wait,
-right-clicking anywhere in a window's text also offers **Paste … into
-…**, the folder that window's shell is in.
+Copied or cut files wait on gtty's own file clipboard (not the system's).
+**Paste pastes what you copied last:** after copying files, every Paste
+(⌘V, or **Paste** in any right-click menu) copies or moves them into the
+folder (the folder name under the mouse, else the folder the window's
+shell is in); after copying text (a name, a selection, or in another
+app), Paste types the text.
 
 **Rename** opens a small field over the name with the name selected up
 to its extension: type the new name (arrows, words with ⌥, Shift to

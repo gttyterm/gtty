@@ -173,8 +173,9 @@ the shell. Users expect it to behave like a shell in a terminal.
   clears it). Right-click on a name = the file menu (`Menu.Purpose.files`,
   `openFileMenu` / `fileMenuPick`, files in `App.menu_files`): Open /
   Open with <app> / Open With… (files; see below), cd <name> (16 characters, …; `cd_label_max`) / Open in Finder (folders); no title row (it opens at the name), Rename… (F2),
-  Copy (⌘C), Cut (⌘X), Paste into X (⌘V; into the folder clicked, else
-  the window's folder), Move to Trash (⌘⌫, Linux Ctrl+Delete; only when
+  Copy (⌘C), Copy Name(s) (`copyNames`: the base names as text, one per
+  line), Cut (⌘X), Paste (⌘V; no other text: files into the folder
+  clicked, else the window's folder; text typed into the job), Move to Trash (⌘⌫, Linux Ctrl+Delete; only when
   `gtty_trash_supported`), Delete… (⌫ / Delete). **Shortcuts act only
   while the mouse "has" the name** (`pointerFresh`: it moved or clicked
   after the last key, `last_point_ms` / `last_key_ms`), so typing with
@@ -185,9 +186,13 @@ the shell. Users expect it to behave like a shell in a terminal.
   `file_clip_move`; not the system's): status line "copy X:
   select a destination, ⌘V pastes" (`clipHelp`); the names copied flash
   white for 350 ms (`App.flashTargets` → `JobWindow.flashNames`,
-  `name_flash`; no bubble); while files wait there, the window's right-click
-  menu has "Paste X into <folder>" (`Menu.edit_paste_files`,
-  `pasteFilesLabel`; the text Paste row stays the system clipboard's). Paste asks (Modal:
+  `name_flash`; no bubble). **The last copy decides what Paste does**
+  (2026-10-08): any new clipboard text (gtty's copy or another app's,
+  `SDL_EVENT_CLIPBOARD_UPDATE` → `clipboardChanged`) empties
+  `file_clip`; while files wait there, every Paste (⌘V: the mouse's
+  folder name / window, else `currentJob`'s folder, `pasteFilesInto`;
+  the right-click menu's plain "Paste" row, `pasteFolder`) pastes the
+  files, else the text. Paste asks (Modal:
   "Copy / Move into X?", Enter = OK, Esc / no answer = nothing), then
   `startFileOp` (copy / move / remove in `gtty_copy.c`: a free name, a
   folder never into itself; move = rename(2), across disks cp + rm; a
@@ -537,7 +542,9 @@ the shell. Users expect it to behave like a shell in a terminal.
     fetch): `show` (Shift: `show -a`) or `fetchRemote`; a folder → `cdTo`.
   - **Press on the mark** (clicks 1): `App.file_press` (no selection yet,
     window focused). Released without moving → a plain click
-    (`mouseDown` + `mouseUp` at the press). Held `FileOpener.hold_ms`
+    (`mouseDown` + `mouseUp` at the press) that also copies the name
+    (`copyNames`: text on the clipboard + paste history, the name
+    flashes, "copied X"; 2026-10-08, `test/copyname.gt`). Held `FileOpener.hold_ms`
     (300) → `opener.held` (`tickFilePress`; outline drawn solid). Moved
     ≥ 4 px: held → `App.dragFile` (`gtty_drag_file`,
     `src/sys/gtty_drag.m`: NSDraggingSession from the SDL window's
@@ -867,16 +874,29 @@ decisions; items marked *open* are undecided.
 - **GitHub Actions** (`.github/workflows/`): `ci.yml` (pull requests
   and by hand only, nothing on a push to main: build + unit tests on
   ubuntu-24.04 with `-Dbundled-sdl` and macos-15 with Homebrew SDL3;
-  `contents: read`); `release.yml` (a GitHub release published, tag
-  `v<version>`, must match build.zig.zon; a tag push alone does
-  nothing: macos-15, environment
-  `release` with the signing secrets, runs `scripts/sign-macos.sh`
+  `contents: read`); `release.yml` (a pushed tag `v*.*.*`, must match
+  build.zig.zon; job `channel` (ubuntu, fetch-depth 0) checks the tag
+  form, picks the channel (see "Releases") and guards a stable x.y.0;
+  then macos-15, environment `edge` or `release` with the signing
+  secrets, runs `scripts/sign-macos.sh`
   (CI path: temporary keychain, API-key notarization) → build-bin.sh +
   package.sh, checks the dmg (codesign, stapler, spctl), SHA256SUMS,
-  `gh release upload --clobber` of the dmg, .deb, .rpm, .tar.gz into that
-  release; workflow-level
+  `gh release create --generate-notes` with the dmg, .deb, .rpm, .tar.gz
+  (a release already made by hand for the tag: `gh release edit` the
+  flags + `upload --clobber`); workflow-level
   `permissions: {}`, the job asks for `contents: write` explicitly; run by
-  hand = the same build as an artifact, no release). The Finder layout
+  hand = the same build as an artifact, no release).
+- **Releases** (two channels, from the tag's MINOR; tags
+  `vMAJOR.MINOR.PATCH`, only `main` lives long): **odd minor = edge**
+  (features being tested; GitHub pre-release, not latest; environment
+  `edge`), **even minor = stable** (normal release, latest; environment
+  `release`). PATCH = fixes within that minor. Edge tags go on main
+  commits. **Promote** a tested edge build by tagging its commit with the
+  next even minor, no merge (CI refuses a stable x.y.0 on a commit
+  without an edge tag): `git tag -a v1.10.0 v1.9.2 -m v1.10.0 && git push
+  origin v1.10.0`. Fixes for a stable line once main has moved on: a
+  `release/X.Y` branch from that stable tag, tagged x.y.1, x.y.2, … (no
+  edge-tag check for PATCH > 0). The Finder layout
   of the dmg needs Automation access on the runner; if it fails the dmg
   is unarranged (warning only).
 - Keep platform-specific C in `src/sys/`; keep `@cImport` only in `src/c.zig`.

@@ -280,8 +280,6 @@ menu_anchor: ?Rect = null,
 menu_range: ?Screen.TextRange = null,
 /// The file menu's "cd <folder>" label.
 menu_cd_label: [cd_label_max * 4 + 8]u8 = undefined,
-menu_paste_label: [64]u8 = undefined,
-menu_paste_buf: [256]u8 = undefined,
 /// The next `JobWindow.file_fx` id (FileFx: what a mouse action did to a
 /// window's files, shown on it for a moment).
 fx_next_id: u32 = 1,
@@ -1503,8 +1501,8 @@ fn toClipboard(app: *App, w: *JobWindow, text: []const u8) void {
 /// Paste shortcut (⌘V, Ctrl+Shift+V, Shift+Insert): into the expanded
 /// peek's filter box, the focused running job, or else the prompt.
 fn pasteKey(app: *App) void {
-    // Files waiting on gtty's file clipboard, the mouse on a window: paste
-    // them there.
+    // Files copied last (gtty's file clipboard), the mouse on a window:
+    // paste them there.
     if (app.filePasteKey()) return;
     if (app.peek) |*pk| if (pk.wantsKeys()) {
         if (c.SDL_GetClipboardText()) |t| {
@@ -1513,7 +1511,25 @@ fn pasteKey(app: *App) void {
         }
         return;
     };
+    // Files copied last, the mouse elsewhere: into the current window's
+    // folder.
+    if (app.file_clip.items.len > 0) {
+        if (!app.pasteFilesInto(app.currentJob())) {
+            beep.beep();
+            app.say("point at a window to paste the files", app.theme.stderr_accent);
+        }
+        return;
+    }
     app.pasteInto(app.focusedJob());
+}
+
+/// The clipboard got new text (gtty's copy or another app's): it is now
+/// what was copied last, so files waiting on gtty's file clipboard go.
+fn clipboardChanged(app: *App) void {
+    if (app.file_clip.items.len == 0) return;
+    for (app.file_clip.items) |p| app.gpa.free(p);
+    app.file_clip.clearRetainingCapacity();
+    app.dirty = true;
 }
 
 /// The clipboard into running job `job` (as a terminal paste, see
@@ -1646,7 +1662,7 @@ fn openMenu(app: *App, x: f32, y: f32) bool {
     var paste_ok = true;
     var folders: ?bool = null;
     var output: ?[]const u8 = null;
-    var paste_files: ?[]const u8 = null;
+    var job: ?*JobWindow = null;
     if (app.maximizedShown() == null and app.prompt.rect.contains(x, y)) {
         target = .prompt;
     } else {
@@ -1663,31 +1679,36 @@ fn openMenu(app: *App, x: f32, y: f32) bool {
         paste_ok = w.running() and w.sync != .follower; // read-only: sync typing
         folders = w.folders_left.items.len > 0;
         output = if (w.copiesLast()) "Copy last output" else "Copy all output";
-        paste_files = app.pasteFilesLabel(w);
+        job = w;
     }
     const history_ok = paste_ok and app.paste_history.items.len > 0;
-    paste_ok = paste_ok and c.SDL_HasClipboardText();
-    app.popMenu(Menu.edit(target, .{ x, y }, copy_ok, output, paste_ok, history_ok, folders, paste_files));
+    // Paste: files copied last go into the window's folder (the prompt:
+    // the current window's); text into the job / the prompt.
+    if (app.file_clip.items.len > 0) {
+        var dbuf: [4096]u8 = undefined;
+        paste_ok = pasteFolder(job orelse app.currentJob(), &dbuf) != null;
+    } else paste_ok = paste_ok and c.SDL_HasClipboardText();
+    app.popMenu(Menu.edit(target, .{ x, y }, copy_ok, output, paste_ok, history_ok, folders));
     return true;
 }
 
-/// The right-click menu's "Paste X into Y" row (files on gtty's file
-/// clipboard, a local window with a folder; in `menu_paste_buf`), else
-/// null.
-fn pasteFilesLabel(app: *App, w: *JobWindow) ?[]const u8 {
-    if (app.file_clip.items.len == 0) return null;
+/// Where files pasted into window `w` go: the folder its program is in
+/// (in `buf`); null for none, a remote session or no folder.
+fn pasteFolder(w: ?*JobWindow, buf: []u8) ?[]const u8 {
+    const win = w orelse return null;
     var rbuf: [4096]u8 = undefined;
-    if (w.remoteNow(&rbuf) != null) return null;
+    if (win.remoteNow(&rbuf) != null) return null;
+    const d = win.folder(buf);
+    return if (d.len > 0) d else null;
+}
+
+/// Paste (menu row or key) with files on gtty's file clipboard: into
+/// `w`'s folder (asks). False: no place for them there.
+fn pasteFilesInto(app: *App, w: ?*JobWindow) bool {
     var dbuf: [4096]u8 = undefined;
-    const d = w.folder(&dbuf);
-    if (d.len == 0) return null;
-    var wbuf: [32]u8 = undefined;
-    var nbuf: [100]u8 = undefined;
-    const name = std.fs.path.basename(d);
-    return std.fmt.bufPrint(&app.menu_paste_buf, "Paste {s} into {s}", .{
-        Menu.oneLine(&nbuf, whatPaths(app.file_clip.items, &wbuf), 24),
-        Menu.oneLine(&app.menu_paste_label, if (name.len > 0) name else "/", 24),
-    }) catch null;
+    const d = pasteFolder(w, &dbuf) orelse return false;
+    app.askPaste(d, w.?);
+    return true;
 }
 
 /// Open menu `m` (closing any other), laid out on screen.
@@ -1805,19 +1826,16 @@ fn menuClick(app: *App, x: f32, y: f32) void {
                     defer app.gpa.free(text);
                     app.toClipboard(w, text);
                 },
-                Menu.edit_paste => if (job) |w| {
+                // What was copied last: files into the window's folder
+                // (the prompt: the current window's), else the text.
+                Menu.edit_paste => if (app.file_clip.items.len > 0) {
+                    if (!app.pasteFilesInto(job orelse app.currentJob())) app.say("nowhere to paste the files here", app.theme.dim);
+                } else if (job) |w| {
                     if (w.running()) app.pasteInto(w);
                 } else app.pasteInto(null),
                 // The title-bar copy: the last command's output (or all), with
                 // its flash.
                 Menu.edit_output => if (job) |w| app.copyJob(w),
-                // Files copied / cut with the file menu: into the window's
-                // folder (asks).
-                Menu.edit_paste_files => if (job) |w| {
-                    var dbuf: [4096]u8 = undefined;
-                    const d = w.folder(&dbuf);
-                    if (d.len > 0) app.askPaste(d, w);
-                },
                 // A new shell in the folder of the window clicked (the
                 // prompt: of the current window).
                 Menu.edit_new_shell => app.newShell(job orelse app.currentJob()),
@@ -3319,6 +3337,7 @@ fn handle(app: *App, ev: *const c.SDL_Event) void {
         c.SDL_EVENT_WINDOW_MOUSE_LEAVE => app.onMouseLeave(),
         c.SDL_EVENT_MOUSE_WHEEL => app.onWheel(ev.wheel.mouse_x * app.density, ev.wheel.mouse_y * app.density, ev.wheel.y),
         c.SDL_EVENT_DROP_BEGIN, c.SDL_EVENT_DROP_POSITION, c.SDL_EVENT_DROP_FILE, c.SDL_EVENT_DROP_COMPLETE => app.onDrop(ev),
+        c.SDL_EVENT_CLIPBOARD_UPDATE => app.clipboardChanged(),
         else => {},
     }
 }
@@ -3757,13 +3776,15 @@ fn clickJob(app: *App, i: usize, x: f32, y: f32, button: u8, clicks: u8) void {
 }
 
 fn onMouseUp(app: *App) void {
-    // A press on a file name that didn't move: a plain click there.
+    // A press on a file name that didn't move: a plain click there, and
+    // the name goes on the clipboard.
     if (app.file_press) |p| {
         app.file_press = null;
         if (app.jobByUid(p.window)) |w| {
             w.opener.held = false;
             w.mouseDown(p.x, p.y, 1);
             w.mouseUp();
+            if (w.fileMarkAt(p.x, p.y)) |m| app.copyNames(@as([]const []const u8, &.{m.file()}), w, m.range);
             app.dirty = true;
         }
     }
@@ -4537,6 +4558,7 @@ const file_cut = 6;
 const file_paste = 7;
 const file_trash = 8;
 const file_delete = 9;
+const file_copy_name = 10;
 
 const sel_mod_name = if (builtin.os.tag == .macos) "⌘" else "Ctrl";
 const file_keys = if (builtin.os.tag == .macos) struct {
@@ -4676,6 +4698,31 @@ fn fileClip(app: *App, paths: [][:0]u8, move: bool, w: ?*JobWindow, single: ?Scr
         file_keys.paste,
     }) catch "select a destination";
     app.say(text, app.theme.prompt_fg);
+}
+
+/// Copy Name (file menu) or a single click on an outlined name: the
+/// names, as text, on the clipboard and the paste history (one per line
+/// when several). The names flash (`single`: the one name, in `w`; else
+/// the ⌘-clicked ones). Being text, it is now what Paste pastes.
+fn copyNames(app: *App, paths: anytype, w: ?*JobWindow, single: ?Screen.TextRange) void {
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(app.gpa);
+    for (paths, 0..) |p, i| {
+        if (i > 0) text.append(app.gpa, '\n') catch return;
+        const name = std.fs.path.basename(p);
+        text.appendSlice(app.gpa, if (name.len > 0) name else p) catch return;
+    }
+    text.append(app.gpa, 0) catch return;
+    const z = text.items[0 .. text.items.len - 1 :0];
+    if (z.len == 0) return;
+    app.flashTargets(paths.len, w, single);
+    app.clearFileSel();
+    app.pushPasteHistory(z);
+    _ = c.SDL_SetClipboardText(z.ptr);
+    var wbuf: [32]u8 = undefined;
+    var nbuf: [100]u8 = undefined;
+    const what = if (paths.len == 1) Menu.oneLine(&nbuf, z, 40) else std.fmt.bufPrint(&wbuf, "{d} names", .{paths.len}) catch "names";
+    app.sayFmt("copied {s}", .{what}, app.theme.ok);
 }
 
 /// An action done with no dialog (copy, cut, trash): flash the names it
@@ -4972,12 +5019,15 @@ fn openFileMenu(app: *App, x: f32, y: f32) bool {
     }
     menu.addCode(.{ .label = "Rename…", .key = "F2", .enabled = one }, file_rename);
     menu.addCode(.{ .label = "Copy", .key = file_keys.copy }, file_copy);
+    menu.addCode(.{ .label = if (one) "Copy Name" else "Copy Names" }, file_copy_name);
     menu.addCode(.{ .label = "Cut", .key = file_keys.cut }, file_cut);
-    var pbuf: [80]u8 = undefined;
-    const pname = if (app.menu_dest) |d| std.fs.path.basename(d) else "";
-    const plabel = std.fmt.bufPrint(&pbuf, "Paste into {s}", .{Menu.oneLine(&app.menu_paste_label, pname, 24)}) catch "Paste";
-    @memcpy(app.menu_paste_buf[0..plabel.len], plabel);
-    menu.addCode(.{ .label = app.menu_paste_buf[0..plabel.len], .key = file_keys.paste, .enabled = app.file_clip.items.len > 0 and app.menu_dest != null }, file_paste);
+    // Paste: what was copied last. Files go into the folder clicked (else
+    // the window's); text is typed into the window's job.
+    const paste_ok = if (app.file_clip.items.len > 0)
+        app.menu_dest != null
+    else
+        w.running() and w.sync != .follower and c.SDL_HasClipboardText();
+    menu.addCode(.{ .label = "Paste", .key = file_keys.paste, .enabled = paste_ok }, file_paste);
     if (c.gtty_trash_supported()) menu.addCode(.{ .label = "Move to Trash", .key = file_keys.trash }, file_trash);
     menu.addCode(.{ .label = "Delete…", .key = file_keys.delete }, file_delete);
     app.popMenu(menu);
@@ -5023,9 +5073,15 @@ fn fileMenuPick(app: *App, uid: ids_mod.Id, code: i32) void {
             app.askRename(paths[0], w, app.menu_anchor);
         },
         file_copy, file_cut => app.fileClip(paths, code == file_cut, w, app.menu_range),
+        file_copy_name => {
+            defer app.freePaths(paths);
+            app.copyNames(paths, w, app.menu_range);
+        },
         file_paste => {
             defer app.freePaths(paths);
-            if (app.menu_dest) |d| app.askPaste(d, w);
+            if (app.file_clip.items.len > 0) {
+                if (app.menu_dest) |d| app.askPaste(d, w);
+            } else if (w.running()) app.pasteInto(w);
         },
         file_trash => app.fileTrash(paths, w, app.menu_range),
         file_delete => app.askDelete(paths, w),

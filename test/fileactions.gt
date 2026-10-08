@@ -13,12 +13,12 @@
 /type LC_ALL=C ls -1
 /wait 800
 # copy notes.txt, paste on sub
-/move 50 120
+/move 50 102
 /wait 300
 /key cmd+c
 /wait 300
 /shot ../g1-copied.bmp
-/move 30 138
+/move 30 120
 /wait 300
 /key cmd+v
 /wait 300
@@ -26,11 +26,11 @@
 /key enter
 /wait 1500
 # cut notes.txt, paste on sub: moved as "notes 2.txt"
-/move 50 120
+/move 50 102
 /wait 300
 /key cmd+x
 /wait 300
-/move 30 138
+/move 30 120
 /wait 300
 /key cmd+v
 /wait 300
@@ -38,12 +38,12 @@
 /wait 1500
 # cmd-click two files, Backspace: asks; Enter deletes
 /mods cmd
+/click 50 66
 /click 50 84
-/click 50 102
 /mods none
 /wait 300
 /shot ../g3-selected.bmp
-/move 50 102
+/move 50 84
 /wait 300
 /key backspace
 /wait 300

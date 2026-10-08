@@ -27,10 +27,13 @@ files stay outside the repo, in `$GTTY_SIGNING_DIR`, default `~/tmp`).
 
 CI (`.github/workflows/ci.yml`) builds and runs the unit tests on Linux
 and macOS for every pull request (a push to main runs nothing). A release
-is a published GitHub release with the tag `v<version>` (the version in
-`build.zig.zon`), e.g. `gh release create v<version> --generate-notes`;
-`.github/workflows/release.yml` then builds, signs, notarizes and uploads
-the packages to it. Pushing a tag alone builds nothing.
+is a pushed tag `v<version>` (the version in `build.zig.zon`);
+`.github/workflows/release.yml` builds, signs, notarizes and publishes
+the GitHub release with the packages. Odd minor (v1.9.x) = edge, a
+pre-release; even minor (v1.10.x) = stable. A stable line starts by
+tagging a tested edge commit, e.g. `git tag -a v1.10.0 v1.9.2 -m v1.10.0
+&& git push origin v1.10.0`; stable fixes go on a `release/X.Y` branch
+when main has moved on. Details in CLAUDE.md ("Releases").
 
 Not yet: full-screen programs (vim, htop, less), bold/italic, and scrolling back past the memory window. New commands from the
 prompt still start in gtty's own folder (a shell window's `cd` doesn't carry
