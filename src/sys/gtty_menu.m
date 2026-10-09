@@ -6,7 +6,10 @@
 // "Preferences…" row (⌘,, no action) becomes "Settings…" with New Window
 // (⌘N), New Shell (⌘T), Run Command and Sync Typing under it. No Edit
 // menu (see gtty_menu.h).
+// The Dock icon's menu (right click) gets New Window too, as Terminal's
+// and Chrome's do.
 #import <Cocoa/Cocoa.h>
+#import <objc/runtime.h>
 #include <SDL3/SDL.h>
 #include "gtty_menu.h"
 
@@ -35,12 +38,20 @@ static gtty_menu_checked_fn menu_checked;
 @end
 
 static GttyMenuTarget *target;
+static NSMenu *dock_menu;
 
 static NSMenuItem *item(NSString *title, int code, NSString *key) {
     NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:title action:@selector(pick:) keyEquivalent:key];
     [it setTarget:target];
     [it setTag:code];
     return it;
+}
+
+// -[NSApplicationDelegate applicationDockMenu:], added to SDL's app
+// delegate (SDL doesn't implement it): the rows above the Dock's own.
+static NSMenu *dockMenu(id self, SEL _cmd, NSApplication *sender) {
+    (void)self; (void)_cmd; (void)sender;
+    return dock_menu;
 }
 
 // A top-level menu inserted into the menu bar at `at`.
@@ -89,6 +100,14 @@ bool gtty_menu_install(uint32_t event_type, gtty_menu_enabled_fn enabled, gtty_m
         [app insertItem:item(@"New Shell", GTTY_MENU_NEW_SHELL, @"t") atIndex:at + 2];
         [app insertItem:item(@"Run Command", GTTY_MENU_RUN, @"") atIndex:at + 3];
         [app insertItem:item(@"Sync Typing", GTTY_MENU_SYNC_TYPING, @"") atIndex:at + 4];
+
+        // Dock menu: New Window. NSApp asks its delegate each time the menu
+        // opens, so adding the method now is enough.
+        dock_menu = [[NSMenu alloc] initWithTitle:@""];
+        [dock_menu addItem:item(@"New Window", GTTY_MENU_NEW_WINDOW, @"")];
+        id delegate = [NSApp delegate];
+        if (delegate != nil)
+            class_addMethod([delegate class], @selector(applicationDockMenu:), (IMP)dockMenu, "@@:@");
 
         return true;
     }

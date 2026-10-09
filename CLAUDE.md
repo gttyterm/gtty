@@ -481,7 +481,10 @@ the shell. Users expect it to behave like a shell in a terminal.
   in the folder of the current window (`currentJob`: focused, else the
   current one; the right-click menu: the window clicked), else home.
   **New Window** (`App.newWindow`, `GTTY_MENU_NEW_WINDOW`, ⌘N /
-  Ctrl+Shift+N, as GNOME Terminal's New Window / New Tab): another gtty process (`gtty_open_new_instance` in
+  Ctrl+Shift+N, as GNOME Terminal's New Window / New Tab; also the
+  Dock icon's right-click menu: macOS `applicationDockMenu:` added to
+  SDL's app delegate in `gtty_menu.m`, Linux the `new-window` action of
+  `gtty.desktop`, a plain `gtty` in home): another gtty process (`gtty_open_new_instance` in
   `gtty_open.c`: own executable, double fork, no args → opens a shell) in
   the current window's folder, else home; its window cascades from this
   one (`App.cascade`: same size, +28 pt right / down, back to the usable

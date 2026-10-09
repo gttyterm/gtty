@@ -10,3 +10,9 @@ Categories=System;TerminalEmulator;
 Keywords=terminal;shell;console;command;prompt;
 StartupWMClass=gtty
 StartupNotify=true
+Actions=new-window;
+
+# The dock's / launcher's right-click menu: another gtty with a shell.
+[Desktop Action new-window]
+Name=New Window
+Exec=gtty

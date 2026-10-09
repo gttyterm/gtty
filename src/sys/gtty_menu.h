@@ -4,7 +4,7 @@
 // gtty's menus in the OS's own menu bar (macOS): the app menu "gtty"
 // (Settings…, Run Command, Sync Typing, next to About / Hide / Quit); it
 // also has New Window (⌘N, another gtty) and New Shell (⌘T, like a new
-// tab). No Edit menu (removed 2026-10-07: with several job windows its
+// tab). The Dock icon's menu has New Window too. No Edit menu (removed 2026-10-07: with several job windows its
 // Copy / Paste read as "which window?"; ⌘C / ⌘V / ⌘A are plain keys in
 // gtty, acting on the window the mouse or keyboard is in).
 // Elsewhere there is no global menu bar: gtty_menu_install returns false
