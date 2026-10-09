@@ -208,6 +208,17 @@ bracketed_paste: bool = false,
 /// nothing.
 reply_buf: [256]u8 = undefined,
 reply_len: usize = 0,
+/// The scroll region (`ESC[t;br`, rows of the live screen, 0-based,
+/// inclusive): a line feed on its last row (or a reverse index on its
+/// first) scrolls only these rows, as vim does above its status line.
+region_top: u16 = 0,
+region_bot: u16 = std.math.maxInt(u16),
+/// The alternate screen (`ESC[?1049h`, vim, less, htop, …): a page of
+/// `rows` rows from `base`; leaving it removes the page and puts the
+/// cursor back. Inside it nothing scrolls into the scrollback.
+alt: ?struct { base: usize, row: usize, col: u16 } = null,
+/// Cursor keys in application mode (`ESC[?1h`): arrows go as `ESC O A`.
+app_cursor: bool = false,
 
 state: State = .ground,
 /// OSC being read: its first bytes, its length, where its ESC was.
@@ -237,11 +248,20 @@ pub fn deinit(s: *Screen) void {
 /// New grid size. A new width reflows the text to fill it.
 pub fn resize(s: *Screen, cols: u16, rows: u16) void {
     const new_cols = @max(cols, 1);
+    // The full-screen program redraws its page at the new size: the page
+    // is dropped before a reflow and made again, blank, after it.
+    const alt_on = s.alt != null;
+    if (alt_on and new_cols != s.cols) s.leaveAlt();
     s.rows = @max(rows, 1);
     if (new_cols != s.cols) {
         s.reflow(new_cols) catch {};
         s.cols = new_cols;
     }
+    if (alt_on) {
+        if (s.alt == null) s.enterAlt() else s.fitAltPage();
+    }
+    s.region_top = 0;
+    s.region_bot = s.rows - 1;
     if (s.cur_col >= s.cols) s.cur_col = s.cols - 1;
     s.scrollBy(0); // keep the scroll in range
     s.generation +%= 1;
@@ -262,6 +282,12 @@ pub fn clear(s: *Screen) void {
     s.out_rows = null;
     s.typed_row = null;
     s.lf_row = 0;
+    if (s.alt) |*a| {
+        a.base = 0;
+        a.row = 0;
+        a.col = 0;
+        s.fitAltPage();
+    }
     s.generation +%= 1;
 }
 
@@ -414,17 +440,19 @@ fn escape(s: *Screen, b: u8) void {
         '(', ')', '*', '+', '#', '%' => s.state = .esc_skip_one,
         '7' => s.saveCursor(),
         '8' => s.restoreCursor(),
-        'M' => { // reverse index
-            const top = s.screenTop();
-            if (s.cur_row > top) s.cur_row -= 1;
-        },
+        'M' => s.reverseIndex(),
         'D' => s.lineFeed(),
         'E' => {
             s.lineFeed();
             s.cur_col = 0;
         },
         'c' => {
+            if (s.alt != null) s.leaveAlt();
             s.pen = .{};
+            s.region_top = 0;
+            s.region_bot = s.rows - 1;
+            s.app_cursor = false;
+            s.bracketed_paste = false;
             s.clear();
         },
         else => {},
@@ -555,12 +583,16 @@ fn param(s: *const Screen, i: usize, default: u32) u32 {
     return if (s.params[i] == 0) default else s.params[i];
 }
 
-/// DEC private modes (`ESC[?…h` / `ESC[?…l`): only bracketed paste is
-/// kept for now; the rest are ignored.
+/// DEC private modes (`ESC[?…h` / `ESC[?…l`): application cursor keys,
+/// the alternate screen and bracketed paste; the rest are ignored.
 fn privateMode(s: *Screen, final: u8) void {
     if (s.private != '?' or (final != 'h' and final != 'l')) return;
-    for (s.params[0..s.nparams]) |p| if (p == 2004) {
-        s.bracketed_paste = final == 'h';
+    const on = final == 'h';
+    for (s.params[0..s.nparams]) |p| switch (p) {
+        1 => s.app_cursor = on,
+        47, 1047, 1049 => if (on) s.enterAlt() else s.leaveAlt(),
+        2004 => s.bracketed_paste = on,
+        else => {},
     };
 }
 
@@ -652,6 +684,29 @@ fn dispatchCsi(s: *Screen, final: u8) void {
         },
         's' => s.saveCursor(),
         'u' => s.restoreCursor(),
+        'r' => { // scroll region; the cursor goes home
+            const t = s.param(0, 1) - 1;
+            const b = @min(s.param(1, s.rows), s.rows) - 1;
+            if (t < b) {
+                s.region_top = @intCast(t);
+                s.region_bot = @intCast(b);
+            } else {
+                s.region_top = 0;
+                s.region_bot = s.rows - 1;
+            }
+            s.cur_row = top;
+            s.cur_col = 0;
+            s.ensureLine(s.cur_row);
+        },
+        'L', 'M' => { // insert / delete lines: the region's rows from the cursor
+            if (s.cur_row < top) return;
+            const rel = s.cur_row - top;
+            if (rel < s.region_top or rel > s.regionBot()) return;
+            s.scrollRows(rel, s.regionBot(), s.param(0, 1), final == 'L');
+            s.cur_col = 0;
+        },
+        'S' => s.scrollRows(s.region_top, s.regionBot(), s.param(0, 1), false),
+        'T' => if (s.nparams <= 1) s.scrollRows(s.region_top, s.regionBot(), s.param(0, 1), true),
         else => {},
     }
 }
@@ -933,7 +988,8 @@ fn put(s: *Screen, cp: u21) void {
     var cell = s.pen;
     cell.cp = cp;
     cell.attrs.wide = w == 2 and s.cols >= 2;
-    cell.attrs.zone = if (s.echo) .input else if (s.ai != .off and s.zone != .none) .ai else s.zone;
+    // A full-screen program's page gets no marks (its echo isn't a typed line).
+    cell.attrs.zone = if (s.alt != null) .none else if (s.echo) .input else if (s.ai != .off and s.zone != .none) .ai else s.zone;
     if (cell.attrs.wide) s.setCell(s.cur_col + 1, s.blank()); // the old pair there is split first
     s.setCell(s.cur_col, cell);
     if (cell.attrs.wide) {
@@ -984,7 +1040,125 @@ fn repairWide(s: *Screen, row: usize) void {
     }
 }
 
+fn regionBot(s: *const Screen) u16 {
+    return @min(s.region_bot, s.rows - 1);
+}
+
+/// Scrolling keeps to the screen's rows (no scrollback): a region that
+/// isn't the whole screen, or the alternate screen.
+fn scrollsInPlace(s: *const Screen) bool {
+    return s.alt != null or s.region_top != 0 or s.regionBot() != s.rows - 1;
+}
+
+/// Scroll the live screen's rows `a..b` (0-based, inclusive) by `n`: up
+/// (the top rows go, blank rows come in at the bottom) or down.
+fn scrollRows(s: *Screen, a: usize, b: usize, n_in: u32, down: bool) void {
+    if (a > b) return;
+    const top = s.screenTop();
+    s.ensureLine(top + s.rows - 1);
+    const n = @min(n_in, b - a + 1);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const out_at = top + if (down) b else a;
+        const in_at = top + if (down) a else b;
+        var gone = s.lines.orderedRemove(out_at);
+        gone.deinit(s.gpa);
+        _ = s.wrapped.orderedRemove(out_at);
+        s.lines.insert(s.gpa, in_at, s.blankLine()) catch return;
+        s.wrapped.insert(s.gpa, in_at, false) catch {
+            var l = s.lines.orderedRemove(in_at);
+            l.deinit(s.gpa);
+            return;
+        };
+    }
+    // The rows above stay; one wrapping into the region doesn't any more.
+    if (top + a > 0) s.setWrapped(top + a - 1, false);
+    s.setWrapped(top + b, false);
+}
+
+/// A new blank row: empty, or filled with the pen's background when it
+/// has one (as xterm's background color erase).
+fn blankLine(s: *Screen) Line {
+    var l: Line = .empty;
+    if (s.pen.bg.tag != .default) {
+        l.appendNTimes(s.gpa, s.blank(), s.cols) catch {};
+    }
+    return l;
+}
+
+fn reverseIndex(s: *Screen) void {
+    const top = s.screenTop();
+    if (s.cur_row >= top and s.cur_row - top == s.region_top) {
+        s.scrollRows(s.region_top, s.regionBot(), 1, true);
+    } else if (s.cur_row > top) s.cur_row -= 1;
+}
+
+fn enterAlt(s: *Screen) void {
+    if (s.alt != null) return;
+    const base = s.lineCount();
+    s.alt = .{ .base = base, .row = s.cur_row, .col = s.cur_col };
+    s.cur_row = base;
+    s.cur_col = 0;
+    s.scroll = 0;
+    s.fitAltPage();
+    var r = base;
+    while (r < s.lines.items.len) : (r += 1) {
+        s.lines.items[r].clearRetainingCapacity();
+        s.wrapped.items[r] = false;
+    }
+    s.trim();
+}
+
+/// The alternate page is exactly `rows` rows from its base.
+fn fitAltPage(s: *Screen) void {
+    const a = s.alt orelse return;
+    const end = a.base + s.rows;
+    s.ensureLine(end - 1);
+    while (s.lines.items.len > end) {
+        var l = s.lines.pop().?;
+        l.deinit(s.gpa);
+        _ = s.wrapped.pop();
+    }
+    s.cur_row = std.math.clamp(s.cur_row, a.base, end - 1);
+}
+
+fn leaveAlt(s: *Screen) void {
+    const a = s.alt orelse return;
+    s.alt = null;
+    while (s.lines.items.len > a.base) {
+        var l = s.lines.pop().?;
+        l.deinit(s.gpa);
+        _ = s.wrapped.pop();
+    }
+    s.cur_row = a.row;
+    s.cur_col = @min(a.col, s.cols - 1);
+    s.ensureLine(s.cur_row);
+    s.region_top = 0;
+    s.region_bot = s.rows - 1;
+    s.scroll = 0;
+    const last = s.lines.items.len;
+    if (s.sel) |sel| {
+        const x, const y = sel.ordered();
+        if (x.row >= last or y.row >= last) s.sel = null;
+    }
+    if (s.out_rows) |*r| {
+        r.start = @min(r.start, last);
+        if (r.end) |*e| e.* = @min(e.*, last);
+    }
+    if (s.typed_row) |*t| t.* = @min(t.*, last);
+    s.lf_row = @min(s.lf_row, last);
+    s.saved_row = @min(s.saved_row, last - 1);
+}
+
 fn lineFeed(s: *Screen) void {
+    if (s.scrollsInPlace()) {
+        const rel = s.cur_row -| s.screenTop();
+        if (rel == s.regionBot()) return s.scrollRows(s.region_top, s.regionBot(), 1, false);
+        if (rel + 1 >= s.rows) return; // the last row, below the region: stays
+        s.cur_row += 1;
+        s.ensureLine(s.cur_row);
+        return;
+    }
     const end = s.viewEnd();
     s.cur_row += 1;
     s.ensureLine(s.cur_row);
@@ -1022,6 +1196,10 @@ fn trim(s: *Screen) void {
     }
     if (s.typed_row) |*t| t.* -|= chunk;
     s.lf_row -|= chunk;
+    if (s.alt) |*a| {
+        a.base -|= chunk;
+        a.row -|= chunk;
+    }
 }
 
 fn eraseLine(s: *Screen, mode: u32) void {
@@ -1056,7 +1234,14 @@ fn eraseDisplay(s: *Screen, mode: u32) void {
             }
             s.eraseLine(1);
         },
-        2 => {
+        2 => if (s.alt != null or s.scrollsInPlace()) {
+            const top = s.screenTop();
+            s.ensureLine(top + s.rows - 1);
+            for (s.lines.items[top .. top + s.rows], s.wrapped.items[top .. top + s.rows]) |*l, *w| {
+                l.clearRetainingCapacity();
+                w.* = false;
+            }
+        } else {
             // Like a classic terminal: push the current screen into scrollback.
             const used = s.lineCount();
             const rel = s.cur_row - s.screenTop();
@@ -1065,7 +1250,7 @@ fn eraseDisplay(s: *Screen, mode: u32) void {
             s.ensureLine(s.cur_row);
             s.trim();
         },
-        3 => s.clear(),
+        3 => if (s.alt == null) s.clear(),
         else => {},
     }
 }
@@ -1591,6 +1776,62 @@ test "zones: prompt, typed command, output" {
     p.feed("hello\r\nhello\r\n");
     try std.testing.expectEqual(Zone.input, p.rowZone(0));
     try std.testing.expectEqual(Zone.output, p.rowZone(1));
+}
+
+test "scroll region: a line feed on its last row scrolls only the region (vim)" {
+    var s = Screen.init(std.testing.allocator);
+    defer s.deinit();
+    s.resize(10, 4);
+    s.feed("1\r\n2\r\n3\r\nstatus");
+    s.feed("\x1b[1;3r\x1b[3;1H\n4");
+    const t = try textOf(&s);
+    defer std.testing.allocator.free(t);
+    try std.testing.expectEqualStrings("2\n3\n4\nstatus", t);
+    // Reverse index on the region's first row scrolls it back down.
+    s.feed("\x1b[1;1H\x1bM0");
+    const t2 = try textOf(&s);
+    defer std.testing.allocator.free(t2);
+    try std.testing.expectEqualStrings("0\n2\n3\nstatus", t2);
+}
+
+test "insert / delete lines and scroll up / down" {
+    var s = Screen.init(std.testing.allocator);
+    defer s.deinit();
+    s.resize(10, 4);
+    s.feed("a\r\nb\r\nc\r\nd\x1b[2;1H\x1b[M");
+    const t = try textOf(&s);
+    defer std.testing.allocator.free(t);
+    try std.testing.expectEqualStrings("a\nc\nd", t);
+    s.feed("\x1b[L\x1b[S");
+    const t2 = try textOf(&s);
+    defer std.testing.allocator.free(t2);
+    try std.testing.expectEqualStrings("\nc\nd", t2);
+    s.feed("\x1b[T");
+    const t3 = try textOf(&s);
+    defer std.testing.allocator.free(t3);
+    try std.testing.expectEqualStrings("\n\nc\nd", t3);
+}
+
+test "alternate screen: a page of its own, gone on leaving" {
+    var s = Screen.init(std.testing.allocator);
+    defer s.deinit();
+    s.resize(10, 3);
+    s.feed("$ vim\r\n");
+    s.feed("\x1b[?1049h\x1b[?1h\x1b[H\x1b[2Jx\r\ny\r\nz\r\nw");
+    try std.testing.expect(s.app_cursor);
+    const t = try textOf(&s);
+    defer std.testing.allocator.free(t);
+    try std.testing.expectEqualStrings("$ vim\n\ny\nz\nw", t); // no scrollback added: x went
+    s.feed("\x1b[?1l\x1b[?1049l$ x");
+    try std.testing.expect(!s.app_cursor);
+    const t2 = try textOf(&s);
+    defer std.testing.allocator.free(t2);
+    try std.testing.expectEqualStrings("$ vim\n$ x", t2);
+    // A resize while on it keeps the page and the place to come back to.
+    s.feed("\x1b[?1049hpage");
+    s.resize(6, 4);
+    s.feed("\x1b[?1049l");
+    try std.testing.expectEqual(@as(usize, 1), s.cur_row);
 }
 
 test "queries: cursor position, device status and attributes are answered" {

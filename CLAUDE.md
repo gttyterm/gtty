@@ -853,6 +853,15 @@ decisions; items marked *open* are undecided.
   `ESC[6n` / `ESC[?6n` cursor position, `ESC[5n`, `ESC[c` (VT220 +
   color). Without them gh's / Go survey prompts hang (fixed 2026-10-08,
   `test/queries.gt`).
+  Full-screen programs (added 2026-10-09, `test/vim.gt`): scroll region
+  (`ESC[t;br`, `region_top` / `region_bot`; `scrollRows`, `lineFeed`,
+  `reverseIndex`), insert / delete lines (`ESC[L` / `ESC[M`), `ESC[S` /
+  `ESC[T`; the alternate screen (`?47` / `?1047` / `?1049`, `Screen.alt`:
+  a page of `rows` rows from `base`, nothing scrolls into the scrollback,
+  no marks, removed on leaving; a width change drops it and makes it
+  again blank, the program redraws); `?1` application cursor keys
+  (`app_cursor` → `jobKeyBytes`: `ESC O A`…); PageUp / PageDown go to
+  the program while on the alternate screen.
 - `src/core/Tee.zig` — every job's full raw output in
   `$TMPDIR/gtty-<pid>/job-<serial>.log`; deleted with the window / on exit,
   stale folders swept at start. Copy-all rebuilds from it after rows drop.
@@ -953,7 +962,8 @@ checking its license first; record third-party components in
 - More chips; folder chip: siblings, a remote folder; peek shrink
   animation, selecting text inside a peek;
   modals, the ⋯ menu.
-- Full-screen programs (vim, htop, less): alternate screen grid.
+- Full-screen programs: the wheel on the alternate screen still scrolls
+  gtty's view (xterm sends arrow keys); mouse reporting (`?1000`…).
 - Blinking text (SGR 5/6 is ignored today; nice-to-have, low priority;
   color-off should stop it too). Blinking cursor.
 - Bold/italic faces; scrolling back past the memory window

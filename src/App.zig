@@ -3471,7 +3471,7 @@ fn onKey(app: *App, key: c.SDL_Keycode, mod: c.SDL_Keymod) void {
     }
     // A running window has focus: keys go straight to its terminal.
     if (app.focusedJob()) |w| {
-        if (jobKeyBytes(key, ctrl, shift)) |bytes| {
+        if (jobKeyBytes(key, ctrl, shift, w.out.app_cursor, w.out.alt != null)) |bytes| {
             w.typeBytes(bytes);
         } else switch (key) {
             c.SDLK_PAGEUP => w.out.scrollBy(@intCast(w.rows -| 1)),
@@ -3574,7 +3574,10 @@ fn editKey(app: *App, w: *JobWindow, key: c.SDL_Keycode, ctrl: bool, cmd: bool, 
 }
 
 /// Bytes a terminal sends for a non-text key (text arrives as TEXT_INPUT).
-fn jobKeyBytes(key: c.SDL_Keycode, ctrl: bool, shift: bool) ?[]const u8 {
+/// `app_cursor`: the program asked for application cursor keys (vim, less);
+/// `full_screen`: it runs on the alternate screen, so PageUp / PageDown
+/// are its keys, not gtty's scrolling.
+fn jobKeyBytes(key: c.SDL_Keycode, ctrl: bool, shift: bool, app_cursor: bool, full_screen: bool) ?[]const u8 {
     if (ctrl and key >= c.SDLK_A and key <= c.SDLK_Z) {
         const ctl = comptime blk: {
             var t: [26][1]u8 = undefined;
@@ -3588,13 +3591,15 @@ fn jobKeyBytes(key: c.SDL_Keycode, ctrl: bool, shift: bool) ?[]const u8 {
         c.SDLK_BACKSPACE => "\x7f",
         c.SDLK_TAB => if (shift) "\x1b[Z" else "\t",
         c.SDLK_ESCAPE => "\x1b",
-        c.SDLK_UP => "\x1b[A",
-        c.SDLK_DOWN => "\x1b[B",
-        c.SDLK_RIGHT => "\x1b[C",
-        c.SDLK_LEFT => "\x1b[D",
-        c.SDLK_HOME => "\x1b[H",
-        c.SDLK_END => "\x1b[F",
+        c.SDLK_UP => if (app_cursor) "\x1bOA" else "\x1b[A",
+        c.SDLK_DOWN => if (app_cursor) "\x1bOB" else "\x1b[B",
+        c.SDLK_RIGHT => if (app_cursor) "\x1bOC" else "\x1b[C",
+        c.SDLK_LEFT => if (app_cursor) "\x1bOD" else "\x1b[D",
+        c.SDLK_HOME => if (app_cursor) "\x1bOH" else "\x1b[H",
+        c.SDLK_END => if (app_cursor) "\x1bOF" else "\x1b[F",
         c.SDLK_DELETE => "\x1b[3~",
+        c.SDLK_PAGEUP => if (full_screen) "\x1b[5~" else null,
+        c.SDLK_PAGEDOWN => if (full_screen) "\x1b[6~" else null,
         else => null,
     };
 }
