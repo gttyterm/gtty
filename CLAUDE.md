@@ -865,6 +865,11 @@ decisions; items marked *open* are undecided.
   again blank, the program redraws); `?1` application cursor keys
   (`app_cursor` → `jobKeyBytes`: `ESC O A`…); PageUp / PageDown go to
   the program while on the alternate screen.
+  Cursor (2026-10-09): `?25` hides / shows it (`Screen.cursor_hidden`);
+  output the user didn't just type for (> `echo_wait_ms` after the last
+  key, `JobWindow.key_ms`) hides it until the output rests
+  `cursor_rest_ms` (`busy_ms`), so redrawn progress (docker build) doesn't
+  drag it around.
 - `src/core/Tee.zig` — every job's full raw output in
   `$TMPDIR/gtty-<pid>/job-<serial>.log`; deleted with the window / on exit,
   stale folders swept at start. Copy-all rebuilds from it after rows drop.

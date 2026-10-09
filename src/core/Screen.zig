@@ -219,6 +219,8 @@ region_bot: u16 = std.math.maxInt(u16),
 alt: ?struct { base: usize, row: usize, col: u16 } = null,
 /// Cursor keys in application mode (`ESC[?1h`): arrows go as `ESC O A`.
 app_cursor: bool = false,
+/// The program hid the cursor (`ESC[?25l`, DECTCEM; `ESC[?25h` shows it).
+cursor_hidden: bool = false,
 
 state: State = .ground,
 /// OSC being read: its first bytes, its length, where its ESC was.
@@ -452,6 +454,7 @@ fn escape(s: *Screen, b: u8) void {
             s.region_top = 0;
             s.region_bot = s.rows - 1;
             s.app_cursor = false;
+            s.cursor_hidden = false;
             s.bracketed_paste = false;
             s.clear();
         },
@@ -584,12 +587,14 @@ fn param(s: *const Screen, i: usize, default: u32) u32 {
 }
 
 /// DEC private modes (`ESC[?…h` / `ESC[?…l`): application cursor keys,
-/// the alternate screen and bracketed paste; the rest are ignored.
+/// the cursor shown / hidden, the alternate screen and bracketed paste;
+/// the rest are ignored.
 fn privateMode(s: *Screen, final: u8) void {
     if (s.private != '?' or (final != 'h' and final != 'l')) return;
     const on = final == 'h';
     for (s.params[0..s.nparams]) |p| switch (p) {
         1 => s.app_cursor = on,
+        25 => s.cursor_hidden = !on,
         47, 1047, 1049 => if (on) s.enterAlt() else s.leaveAlt(),
         2004 => s.bracketed_paste = on,
         else => {},
@@ -1995,6 +2000,9 @@ test "bracketed paste mode follows ESC[?2004h / l" {
     try std.testing.expect(s.bracketed_paste);
     s.feed("\x1b[?25l"); // another private mode: no change
     try std.testing.expect(s.bracketed_paste);
+    try std.testing.expect(s.cursor_hidden);
+    s.feed("\x1b[?25h");
+    try std.testing.expect(!s.cursor_hidden);
     s.feed("\x1b[?2004l");
     try std.testing.expect(!s.bracketed_paste);
 }

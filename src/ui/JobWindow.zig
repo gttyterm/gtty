@@ -169,6 +169,13 @@ name_flash: ?struct { ranges: [16]Screen.TextRange = undefined, n: usize = 0, ms
 /// When the user last typed into a program without shell marks (its echo
 /// counts as input for a short while: `Screen.echo`).
 echo_ms: u64 = 0,
+/// When the user last sent the job anything (keys, paste, a typed cd).
+key_ms: u64 = 0,
+/// When output last came that the user's typing didn't ask for (a build's
+/// progress lines being redrawn, …): the cursor stays hidden until the
+/// output rests `cursor_rest_ms`, so it doesn't jump around after the
+/// redraws (0: resting).
+busy_ms: u64 = 0,
 /// The selection was made with Shift + arrows in a shell's input line: its
 /// head follows the shell's cursor (see `editMove`).
 key_sel: bool = false,
@@ -363,6 +370,10 @@ pub fn pump(w: *JobWindow, gfx: *Gfx) bool {
         changed = true;
     }
     if (changed) if (w.log) |*l| l.flush(); // readable from outside as it comes
+    if (changed) {
+        const now = c.SDL_GetTicks();
+        if (now -| w.key_ms > echo_wait_ms) w.busy_ms = now;
+    }
     // A command started: a listing one is remembered (`refreshListing`).
     if (w.out.cmd_seq != w.cmd_seen) {
         w.cmd_seen = w.out.cmd_seq;
@@ -550,6 +561,7 @@ pub fn send(w: *JobWindow, bytes: []const u8) void {
         w.sync_refused = true;
         return;
     }
+    w.key_ms = c.SDL_GetTicks();
     w.proc.write(bytes);
     w.mirror(bytes);
 }
@@ -585,6 +597,7 @@ fn input(w: *JobWindow, bytes: []const u8) void {
         w.echo_ms = c.SDL_GetTicks();
     }
     w.out.scroll = 0;
+    w.key_ms = c.SDL_GetTicks();
     w.proc.write(bytes);
 }
 
@@ -1556,6 +1569,11 @@ fn tickRest(w: *JobWindow, gfx: *Gfx, now: u64) bool {
         if (now -| w.anim_ms >= anim_len_ms) w.anim_from = null;
         return true;
     }
+    // The output rested: the cursor comes back.
+    if (w.busy_ms != 0 and now -| w.busy_ms >= cursor_rest_ms) {
+        w.busy_ms = 0;
+        if (w.focused) chips = true;
+    }
     if (w.out.scroll_moves != w.scroll_seen) {
         w.scroll_seen = w.out.scroll_moves;
         w.scroll_ms = now;
@@ -1574,6 +1592,11 @@ fn tickRest(w: *JobWindow, gfx: *Gfx, now: u64) bool {
 const chips_refresh_ms = 1000;
 
 const scroll_label_ms = 2000;
+/// Output this soon after the user's typing is its answer (the echo, the
+/// command's first lines): the cursor stays.
+const echo_wait_ms = 300;
+/// Output nobody typed for hides the cursor until it rests this long.
+const cursor_rest_ms = 250;
 
 pub fn scrollAt(w: *JobWindow, lines: isize) void {
     w.out.scrollBy(lines);
@@ -2222,7 +2245,8 @@ fn drawTitle(w: *JobWindow, gfx: *Gfx, theme: *const Theme, chrome: *Gfx.Face) v
 }
 
 fn showCursor(w: *const JobWindow) bool {
-    return w.focused and w.proc.running() and w.out.scroll == 0;
+    return w.focused and w.proc.running() and w.out.scroll == 0 and
+        !w.out.cursor_hidden and w.busy_ms == 0;
 }
 
 /// Red square with a white ×.
