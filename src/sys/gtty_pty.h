@@ -19,6 +19,8 @@ int gtty_resize(int master_fd, unsigned short cols, unsigned short rows);
 // Returns bytes read, GTTY_AGAIN when nothing is available, GTTY_EOF when closed.
 long gtty_read(int fd, unsigned char *buf, unsigned long len);
 long gtty_write(int fd, const unsigned char *buf, unsigned long len);
+// Wait up to timeout_ms for fd to have something to read: 1 yes, 0 no.
+int gtty_wait_readable(int fd, int timeout_ms);
 
 // Returns 1 and sets *code once the child has exited, 0 while it runs.
 int gtty_poll_exit(int pid, int *code);

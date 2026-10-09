@@ -25,6 +25,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <dirent.h>
+#include <poll.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -121,6 +122,12 @@ int gtty_resize(int master_fd, unsigned short cols, unsigned short rows) {
     ws.ws_col = cols;
     ws.ws_row = rows;
     return ioctl(master_fd, TIOCSWINSZ, &ws) == 0 ? 0 : -errno;
+}
+
+int gtty_wait_readable(int fd, int timeout_ms) {
+    if (fd < 0) return 0;
+    struct pollfd p = {.fd = fd, .events = POLLIN};
+    return poll(&p, 1, timeout_ms) > 0 ? 1 : 0;
 }
 
 long gtty_read(int fd, unsigned char *buf, unsigned long len) {

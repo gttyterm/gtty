@@ -351,8 +351,15 @@ pub fn pump(w: *JobWindow, gfx: *Gfx) bool {
     var budget: usize = 512 * 1024;
     const deadline = c.SDL_GetTicksNS() + pump_ns;
     if (w.out.echo and c.SDL_GetTicks() -| w.echo_ms > echo_ms_max) w.out.echo = false;
+    // A program redrawing its screen (docker's progress, …) writes a frame
+    // in many small writes: while they keep coming (`settle_ms` apart at
+    // most), read on, so a half-drawn frame isn't shown (the text would
+    // seem to jump).
     while (budget > 0 and c.SDL_GetTicksNS() < deadline) {
-        const chunk = w.proc.read(.out, &buf) orelse break;
+        const chunk = w.proc.read(.out, &buf) orelse {
+            if (!changed or !w.proc.waitOutput(settle_ms)) break;
+            continue;
+        };
         if (w.log) |*l| l.write(chunk);
         w.out.feed(chunk);
         // Answers to the program's queries (cursor position, …) go straight
@@ -761,6 +768,8 @@ fn repeat(w: *JobWindow, bytes: []const u8, n: usize) void {
 pub var hard_kill_ms: u64 = 2000;
 /// Longest one pump() may spend parsing output per frame.
 const pump_ns = 10 * std.time.ns_per_ms;
+/// How long `pump` waits for more of a burst of output before drawing.
+const settle_ms = 2;
 
 /// Kill the job: hang up first (lets programs clean up); if it is still
 /// running `hard_kill_ms` later, pump() kills it hard.
