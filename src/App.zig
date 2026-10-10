@@ -1692,6 +1692,33 @@ fn openMenu(app: *App, x: f32, y: f32) bool {
     return true;
 }
 
+/// Right click on a folder chip (windows area): its menu (Copy Name,
+/// Copy Path, Open in Finder). False when the click is somewhere else.
+fn openChipMenu(app: *App, x: f32, y: f32) bool {
+    const i = app.windowAt(x, y) orelse return false;
+    if (!app.isShown(i)) return false;
+    const w = app.jobs.items[i];
+    if (w.hit(x, y) != .folder_chip or w.cwd().len == 0) return false;
+    app.chip_hover = null;
+    app.popMenu(Menu.folderChip(w.uid, .{ x, y }));
+    return true;
+}
+
+/// The folder chip menu's Copy Name / Copy Path: the window's folder (its
+/// name, or the full path) on the clipboard and the paste history; the
+/// chip flashes.
+fn copyFolder(app: *App, w: *JobWindow, name_only: bool) void {
+    const d = w.cwd();
+    if (d.len == 0) return;
+    const text = if (name_only) (w.folderName() orelse return) else d;
+    const z = app.gpa.dupeZ(u8, text) catch return;
+    defer app.gpa.free(z);
+    app.pushPasteHistory(z);
+    _ = c.SDL_SetClipboardText(z.ptr);
+    w.flashFolderChip();
+    app.sayFmt("copied {s}", .{text}, app.theme.ok);
+}
+
 /// Where files pasted into window `w` go: the folder its program is in
 /// (in `buf`); null for none, a remote session or no folder.
 fn pasteFolder(w: ?*JobWindow, buf: []u8) ?[]const u8 {
@@ -1858,6 +1885,15 @@ fn menuClick(app: *App, x: f32, y: f32) void {
             app.menu_dest = dest;
             app.fileMenuPick(uid, m.codes[row]);
             app.freeMenuFiles();
+        },
+        .folder_chip => |uid| {
+            app.closeMenu();
+            const w = app.jobByUid(uid) orelse return;
+            switch (m.codes[row]) {
+                Menu.chip_copy_name, Menu.chip_copy_path => app.copyFolder(w, m.codes[row] == Menu.chip_copy_name),
+                Menu.chip_open => app.openFolder(w),
+                else => {},
+            }
         },
         .paste_history, .folder_history => {}, // the submenus have their own click (subMenuClick)
     }
@@ -2450,7 +2486,9 @@ fn peekAction(app: *App, a: Peek.Action) void {
         .copy => {
             const z = app.gpa.dupeZ(u8, pk.full) catch return;
             defer app.gpa.free(z);
+            app.pushPasteHistory(z);
             _ = c.SDL_SetClipboardText(z.ptr);
+            pk.flashText();
             app.sayFmt("copied {s}", .{pk.full}, app.theme.ok);
         },
         // A folder picked in the folder chip's peek: cd there, if the
@@ -3649,6 +3687,12 @@ fn onClick(app: *App, x: f32, y: f32, button: u8, clicks: u8) void {
     if (app.peek) |*pk| {
         if (pk.contains(x, y)) {
             if (button == c.SDL_BUTTON_LEFT) app.peekAction(pk.click(x, y));
+            // The folder peek: the chip's menu (the peek goes).
+            if (button == c.SDL_BUTTON_RIGHT and pk.kind == .folder) {
+                const uid = pk.uid;
+                app.closePeek();
+                app.popMenu(Menu.folderChip(uid, .{ x, y }));
+            }
             return;
         }
         app.closePeek();
@@ -3711,6 +3755,7 @@ fn onClick(app: *App, x: f32, y: f32, button: u8, clicks: u8) void {
         app.mouse = .{ x, y };
         app.sendHover();
         if (app.openFileMenu(x, y)) return;
+        if (app.openChipMenu(x, y)) return;
         if (app.openMenu(x, y)) return;
     }
     // A maximized job window covers everything.
@@ -5795,7 +5840,7 @@ fn render(app: *App) void {
                 .prompt => true,
                 .job => |uid| app.jobByUid(uid) != null,
             },
-            .folder_history, .files => |uid| app.jobByUid(uid) != null,
+            .folder_history, .files, .folder_chip => |uid| app.jobByUid(uid) != null,
             .open_with, .bar => true,
         };
         if (alive) {

@@ -5,15 +5,17 @@
 //! the git chip and the folder chip in a job window's footer.
 //!
 //!   * **Folder chip** (`kind` folder): hover or click the chip = the same
-//!     box with the full path; a click on the path copies it, the mouse on
-//!     the expand button (or a click on it) expands it. Expanded, the list is the folders
+//!     box with the full path; the mouse on the expand button, or a click
+//!     on it or the path, expands it (a right click: App's folder chip
+//!     menu, Copy Name / Copy Path / Open in Finder). Expanded, the list is the folders
 //!     above the current one and the current one itself (`/` on top, the
 //!     current folder at the bottom next to the chip, the parent above it,
 //!     selected). Picking one asks App to `cd` there (`Action.cd`, the
 //!     shell at its prompt only).
 //!
 //!   * **Peek:** a plain floating box over the chip, in the normal text
-//!     size: [copy] [expand]  full branch name  [×].
+//!     size: [copy] [expand]  full branch name  [×]. The copy button
+//!     copies the text, which flashes white; a click on the text expands.
 //!   * **Expanded peek:** the same box grown upward into a list of the
 //!     local branches (the current one marked) with a filter box on top
 //!     that has the keyboard. Picking one runs `git switch` in the window's
@@ -73,6 +75,8 @@ already: bool = false,
 state_ms: u64 = 0,
 /// Git's message when switching failed (last lines).
 err_msg: std.ArrayList(u8) = .empty,
+/// When the copy button copied the text (it flashes); 0 = not flashing.
+flash_ms: u64 = 0,
 /// When the mouse left the peek (the countdown runs); 0 while it is over it.
 leave_ms: u64 = 0,
 
@@ -100,6 +104,8 @@ pub const Action = enum { none, redraw, copy, close, cd };
 pub var dismiss_ms: u64 = 5000;
 /// After a successful action: green border this long, then closed.
 const ok_ms = 1000;
+/// How long the copied text flashes (as a job window's name flash).
+const flash_len_ms = 350;
 /// Most rows in the expanded list before it scrolls.
 const max_rows = 10;
 
@@ -162,6 +168,11 @@ pub fn setFull(p: *Peek, full: []const u8) void {
     const copy = p.gpa.dupe(u8, full) catch return;
     p.gpa.free(p.full);
     p.full = copy;
+}
+
+/// The text was copied: flash it.
+pub fn flashText(p: *Peek) void {
+    p.flash_ms = @max(c.SDL_GetTicks(), 1);
 }
 
 /// Has the keyboard (the filter box): only while expanded.
@@ -320,6 +331,10 @@ pub fn tick(p: *Peek, now: u64, reaper: *Process.Reaper) enum { none, redraw, cl
         if (now -| p.leave_ms >= dismiss_ms) return .close;
         return .redraw; // the countdown bar moves
     }
+    if (p.flash_ms != 0) {
+        if (now -| p.flash_ms >= flash_len_ms) p.flash_ms = 0;
+        return .redraw;
+    }
     return .none;
 }
 
@@ -354,8 +369,11 @@ pub fn click(p: *Peek, x: f32, y: f32) Action {
         p.sel = k;
         return p.pick();
     }
-    // The folder peek: a click on the path copies it.
-    if (p.kind == .folder and p.text_r.contains(x, y)) return .copy;
+    // A click on the text expands (copying is the copy button's).
+    if (p.text_r.contains(x, y) and !p.expanded) {
+        p.toggleExpand();
+        return .redraw;
+    }
     return .none;
 }
 
@@ -470,7 +488,16 @@ pub fn draw(p: *const Peek, gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, sf: *G
     expandIcon(gfx, p.expand_r, theme, ui, p.expanded, p.over == .expand);
     JobWindow.closeIcon(gfx, p.close_r, theme, ui);
     gfx.clip(p.text_r);
-    _ = gfx.text(f, p.text_r.x, p.text_r.y + @round((p.text_r.h - f.cell_h) / 2), p.full, theme.prompt_fg);
+    const hy = p.text_r.y + @round((p.text_r.h - f.cell_h) / 2);
+    const tend = gfx.text(f, p.text_r.x, hy, p.full, theme.prompt_fg);
+    if (p.flash_ms != 0) {
+        const ft = now -| p.flash_ms;
+        if (ft < flash_len_ms) {
+            const left = 1 - @as(f32, @floatFromInt(ft)) / @as(f32, flash_len_ms);
+            const pad = @round(3 * ui);
+            gfx.fillAlpha(.{ .x = p.text_r.x - pad, .y = hy - pad, .w = tend - p.text_r.x + 2 * pad, .h = f.cell_h + 2 * pad }, .{ .r = 255, .g = 255, .b = 255 }, @intFromFloat(@round(170 * left)));
+        }
+    }
     gfx.clip(null);
 
     if (p.expanded) {
@@ -617,7 +644,7 @@ test "folder peek: the folders above, / first, the current last, starting on the
     try t.expectEqual(@as(usize, 0), root.sel);
 }
 
-test "folder peek: the mouse onto the expand button expands it, a click on the path copies" {
+test "folder peek: the mouse onto the expand button expands it, so does a click on the path" {
     const t = std.testing;
     var p = try Peek.openFolder(t.allocator, 1, "/a/b", .{});
     var reaper: Process.Reaper = .{ .gpa = t.allocator };
@@ -628,7 +655,12 @@ test "folder peek: the mouse onto the expand button expands it, a click on the p
     p.text_r = .{ .x = 40, .y = 0, .w = 40, .h = 20 };
     _ = p.motion(50, 5, 1);
     try t.expect(!p.expanded);
-    try t.expectEqual(Action.copy, p.click(50, 5));
+    try t.expectEqual(Action.redraw, p.click(50, 5));
+    try t.expect(p.expanded);
+    // Expanded: the path does nothing more (the expand button folds it).
+    try t.expectEqual(Action.none, p.click(50, 5));
+    try t.expect(p.expanded);
+    p.expanded = false;
     _ = p.motion(25, 5, 2);
     try t.expect(p.expanded);
 }

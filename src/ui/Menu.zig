@@ -82,6 +82,9 @@ pub const Purpose = union(enum) {
     /// file actions (`codes[i]`: App's `file_*` codes; the files are
     /// App's `menu_files`).
     files: ids.Id,
+    /// The right-click menu on a folder chip or its peek (window id):
+    /// `codes[i]` = `chip_copy_name`, `chip_copy_path`, `chip_open`.
+    folder_chip: ids.Id,
 };
 
 /// The app picker's "Other…" row: the system's choose-an-app dialog.
@@ -111,6 +114,11 @@ pub const new_shell_key = if (builtin.os.tag == .macos) "⌘T" else "Ctrl+Shift+
 /// New Window's key (another gtty): ⌘N on macOS, Ctrl+Shift+N elsewhere
 /// (as GNOME Terminal; Ctrl+N alone is the job's: the next history line).
 pub const new_window_key = if (builtin.os.tag == .macos) "⌘N" else "Ctrl+Shift+N";
+
+/// The folder chip's menu rows (`folderChip`).
+pub const chip_copy_name = 0;
+pub const chip_copy_path = 1;
+pub const chip_open = 2;
 
 pub const edit_keys: [2][]const u8 = if (builtin.os.tag == .macos)
     .{ "⌘C", "⌘V" }
@@ -150,6 +158,17 @@ pub fn edit(target: Target, at: [2]f32, copy_ok: bool, output: ?[]const u8, past
     m.addCode(.{ .label = "Paste", .key = edit_keys[1], .enabled = paste_ok, .sub = true, .sub_on = history_ok }, edit_paste);
     if (folders) |on| m.addCode(.{ .label = "History", .enabled = on, .sub = true, .sub_on = on }, edit_folders);
     m.addCode(.{ .label = "New Shell", .key = new_shell_key }, edit_new_shell);
+    return m;
+}
+
+/// The right-click menu of window `uid`'s folder chip (or its peek):
+/// Copy Name, Copy Path, Open in Finder (Linux: the desktop's file
+/// manager).
+pub fn folderChip(uid: ids.Id, at: [2]f32) Menu {
+    var m: Menu = .{ .purpose = .{ .folder_chip = uid }, .at = at };
+    m.addCode(.{ .label = "Copy Name" }, chip_copy_name);
+    m.addCode(.{ .label = "Copy Path" }, chip_copy_path);
+    m.addCode(.{ .label = if (builtin.os.tag == .macos) "Open in Finder" else "Open in Files" }, chip_open);
     return m;
 }
 

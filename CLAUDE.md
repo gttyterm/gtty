@@ -143,8 +143,10 @@ the shell. Users expect it to behave like a shell in a terminal.
   badge of a failed window sits in the strip's right end.
   - **Folder chip peek** (`Peek.kind` folder, `Peek.openFolder`,
     `App.openFolderPeek`): hover or a click = the peek (copy, full path;
-    a click on the path copies it too, `Peek.click`); the mouse onto its
-    expand button (or a click on it) expands it (`Peek.motion`): the
+    the copy button flashes the path white, `Peek.flashText`); the mouse
+    onto its expand button, or a click on it or on the path, expands it
+    (`Peek.click`, `Peek.motion`; changed 2026-10-10: the path click
+    copied before, with no sign): the
     folders above (`/` on top) and
     the current folder last (green dot, by the chip; picking it = "already
     here"), the parent above it selected; filter + keys as the branch
@@ -152,6 +154,13 @@ the shell. Users expect it to behave like a shell in a terminal.
     shell is at its prompt (green "cd sent", closes after 1 s; that feeds
     the History ▸ list), else red "the shell is busy" + beep. Closes when
     the folder changes some other way.
+  - **Folder chip menu** (added 2026-10-10; `Menu.folderChip`, purpose
+    `folder_chip`, `App.openChipMenu`): a right click on the chip, or on
+    its peek (the peek closes) → Copy Name / Copy Path (`App.copyFolder`:
+    clipboard + paste history, the chip flashes white,
+    `JobWindow.flashFolderChip`) / Open in Finder (Linux "Open in Files";
+    `App.openFolder`, as the title bar's folder button). Test:
+    `test/folderchip.gt`.
   - **Peek** (`src/ui/Peek.zig`, one at a time, `App.peek`): opens after
     0.5 s hover (`chip_hover_ms`) or a click; [copy] [expand ^] full branch
     [×]; grows up from the chip in the normal text size. Mouse away → 5 s

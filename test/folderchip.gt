@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The folder chip's menu and peek: a right click on the chip = Copy Name /
+# Copy Path / Open in Finder (Copy flashes the chip); its peek: a click on
+# the path expands it, the copy button copies and the path flashes, a
+# right click = the same menu. Run with GTTY_SHOW_DRY=1 in a scratch folder:
+#   mkdir -p w && cd w && GTTY_SHOW_DRY=1 gtty --script $REPO/test/folderchip.gt
+# Shots go to the folder above.
+/s bash
+/wait 1500
+/rclick 45 620
+/wait 400
+/shot ../fc1-menu.bmp
+/click 80 640
+/wait 100
+/shot ../fc2-copied-name.bmp
+/wait 500
+/rclick 45 620
+/wait 300
+/click 80 698
+/wait 400
+/shot ../fc3-open.bmp
+/move 45 620
+/wait 900
+/shot ../fc4-peek.bmp
+/click 24 612
+/wait 100
+/shot ../fc5-copy-flash.bmp
+/wait 500
+/rclick 300 612
+/wait 300
+/shot ../fc6-peek-menu.bmp
+/key escape
+/wait 300
+/move 45 620
+/wait 900
+/click 300 612
+/wait 400
+/shot ../fc7-expanded.bmp
+/quit

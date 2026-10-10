@@ -165,6 +165,9 @@ copy_flash: ?struct { first: usize, end: usize, ms: u64 } = null,
 file_fx: ?FileFx = null,
 /// File names put on gtty's file clipboard (copy / cut): a white flash
 /// over just those names (`flashNames`, `drawNameFlash`).
+/// When the folder chip's name / path was copied (its menu): the chip
+/// flashes white; 0 = not flashing.
+chip_flash_ms: u64 = 0,
 name_flash: ?struct { ranges: [16]Screen.TextRange = undefined, n: usize = 0, ms: u64 } = null,
 /// When the user last typed into a program without shell marks (its echo
 /// counts as input for a short while: `Screen.echo`).
@@ -1529,6 +1532,16 @@ pub fn tip(w: *const JobWindow, h: Hit) ?struct { text: []const u8, r: Rect } {
 /// Once a frame: true when the window needs a redraw (the "↑ N" label
 /// timed out).
 pub fn tick(w: *JobWindow, gfx: *Gfx, now: u64) bool {
+    // The folder chip's flash: redraw every frame while it shows.
+    if (w.chip_flash_ms != 0) {
+        if (now -| w.chip_flash_ms >= name_flash_ms) w.chip_flash_ms = 0;
+        _ = w.tickNames(gfx, now);
+        return true;
+    }
+    return w.tickNames(gfx, now);
+}
+
+fn tickNames(w: *JobWindow, gfx: *Gfx, now: u64) bool {
     // The name flash: redraw every frame while it shows.
     if (w.name_flash) |f| {
         if (now -| f.ms >= name_flash_ms) w.name_flash = null;
@@ -1718,6 +1731,11 @@ pub fn flashNames(w: *JobWindow, ranges: []const Screen.TextRange) void {
     f.n = @min(ranges.len, f.ranges.len);
     @memcpy(f.ranges[0..f.n], ranges[0..f.n]);
     w.name_flash = f;
+}
+
+/// The folder chip's name or path copied: the chip flashes white.
+pub fn flashFolderChip(w: *JobWindow) void {
+    w.chip_flash_ms = @max(c.SDL_GetTicks(), 1);
 }
 
 /// The name flash: the names' boxes flash white, fading out.
@@ -2057,6 +2075,13 @@ fn drawFooter(w: *const JobWindow, gfx: *Gfx, theme: *const Theme) void {
     }
     if (w.folderName()) |name| if (w.folder_chip_r.w > 0)
         drawChip(gfx, theme, f, ui, w.folder_chip_r, name, w.over_folder_chip or w.folder_peek_open, .folder, true);
+    if (w.chip_flash_ms != 0) {
+        const t = c.SDL_GetTicks() -| w.chip_flash_ms;
+        if (t < name_flash_ms) {
+            const left = 1 - @as(f32, @floatFromInt(t)) / @as(f32, name_flash_ms);
+            gfx.fillAlpha(w.folder_chip_r, .{ .r = 255, .g = 255, .b = 255 }, @intFromFloat(@round(170 * left)));
+        }
+    }
 }
 
 /// A chip: its icon and label (cut with … when long); lighter while the
