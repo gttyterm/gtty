@@ -30,10 +30,9 @@ and macOS for every pull request (a push to main runs nothing). A release
 is a pushed tag `v<version>` (the version in `build.zig.zon`);
 `.github/workflows/release.yml` builds, signs, notarizes and publishes
 the GitHub release with the packages. Odd minor (v1.9.x) = edge, a
-pre-release; even minor (v1.10.x) = stable. Edge tags go on `develop`,
-stable tags on `main` (CI checks). A stable line starts by merging
-develop (version set to x.y.0) into main with `--no-ff` and tagging there;
-stable fixes are commits on main (x.y.1, …), merged back into develop.
+pre-release; even minor (v1.10.x) = stable. CI checks only that and
+that the tag equals `build.zig.zon`'s version at the tagged commit.
+Releases are tagged on `main`; `develop` may be ahead.
 Details in CLAUDE.md ("Releases").
 
 Not yet: full-screen programs (vim, htop, less), bold/italic, and scrolling back past the memory window. New commands from the

@@ -10,17 +10,8 @@
 #   odd  (v1.9.2)  edge:   environment "edge", a pre-release, not latest;
 #   even (v1.10.0) stable: environment "release", a normal release, latest.
 #
-# Two long-lived branches: develop (edge) and main (stable). An edge tag
-# must be on develop, a stable tag on main.
-#
-# Promote: on develop set build.zig.zon to x.(even).0, merge --no-ff into
-# main, tag there, then bump develop to the next edge version:
-#
-#   git switch main && git merge --no-ff develop
-#   git tag -a v1.10.0 -m v1.10.0 && git push origin main v1.10.0
-#
-# Stable fix: commit on main with the version bumped to x.y.N+1, tag it,
-# then merge main into develop.
+# Nothing else is checked: the tag must equal build.zig.zon's version at
+# the tagged commit (any branch).
 #
 # Run by hand (Actions → Release → Run workflow): the same build, signed
 # and notarized, kept as a workflow artifact only; no release, no tag.
@@ -53,11 +44,6 @@ jobs:
       env: ${{ steps.channel.outputs.env }}
       prerelease: ${{ steps.channel.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0 # the tags, for the stable guard
-          persist-credentials: false
-
       - name: Channel from the tag
         id: channel
         env:
@@ -76,16 +62,11 @@ jobs:
           fi
           minor=${BASH_REMATCH[2]}
           if (( 10#$minor % 2 == 1 )); then
-            chan=edge env=edge prerelease=true branch=develop
+            chan=edge env=edge prerelease=true
           else
-            chan=stable env=release prerelease=false branch=main
+            chan=stable env=release prerelease=false
           fi
           echo "$TAG: $chan ($env, pre-release: $prerelease)"
-          # Edge tags go on develop, stable tags on main.
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$branch"; then
-            echo "::error::$TAG is a $chan tag: its commit must be on $branch"
-            exit 1
-          fi
           echo "env=$env" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
