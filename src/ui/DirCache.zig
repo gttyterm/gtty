@@ -8,6 +8,11 @@
 //! (`file_path.longestKnown`). The other names are found by the run and a
 //! check on disk, as before.
 //!
+//! Names are kept by their text without the blanks they start or end
+//! with (` Buck Rogers E01.mp4` is looked up as `Buck Rogers E01.mp4`):
+//! the outline goes around what can be seen, `find` gives back the real
+//! name for the file itself.
+//!
 //! The last `max_dirs` folders asked about are kept (the least recently
 //! used one goes). A folder is read again when its modification time
 //! changed (a file added, removed or renamed in it), looked at no more
@@ -28,7 +33,8 @@ const gpa = std.heap.c_allocator;
 const Dir = struct {
     path: []u8,
     mtime: [2]i64,
-    names: std.StringHashMapUnmanaged(void) = .empty,
+    /// Name without its outer blanks → the name.
+    names: std.StringHashMapUnmanaged([]const u8) = .empty,
     arena: std.heap.ArenaAllocator,
     /// Last used (`clock`), last looked at on disk (ms).
     used: u64 = 0,
@@ -44,10 +50,17 @@ const Dir = struct {
 var dirs: [max_dirs]?Dir = [_]?Dir{null} ** max_dirs;
 var clock: u64 = 0;
 
-/// Folder `dir` (absolute) has an entry `name` that `specialName` accepts.
-pub fn has(dir: []const u8, name: []const u8) bool {
-    const d = get(dir) orelse return false;
-    return d.names.contains(name);
+/// The entry of folder `dir` (absolute) shown as `text` (no outer
+/// blanks): `text` itself, or a name that starts / ends with blanks.
+/// Only names the plain run misses (`specialName`, or outer blanks).
+pub fn find(dir: []const u8, text: []const u8) ?[]const u8 {
+    const d = get(dir) orelse return null;
+    return d.names.get(text);
+}
+
+/// `name` without the blanks it starts or ends with.
+pub fn trimmed(name: []const u8) []const u8 {
+    return std.mem.trim(u8, name, " \t");
 }
 
 /// Forget everything (at exit).
@@ -116,9 +129,15 @@ fn load(slot: *?Dir, dir: []const u8, z: [:0]const u8, now: u64) ?*Dir {
         seen += 1;
         if (seen > max_scan) break;
         const name = std.mem.span(@as([*:0]const u8, @ptrCast(&e.*.d_name)));
-        if (!file_path.specialName(name)) continue;
+        const key = trimmed(name);
+        if (key.len == 0) continue;
+        const outer = key.len != name.len;
+        if (!outer and !file_path.specialName(name)) continue;
         const copy = d.arena.allocator().dupe(u8, name) catch break;
-        d.names.put(gpa, copy, {}) catch break;
+        const kcopy = copy[@intFromPtr(key.ptr) - @intFromPtr(name.ptr) ..][0..key.len];
+        // `a b` and ` a b` both there: the text as shown is the name.
+        const gop = d.names.getOrPut(gpa, kcopy) catch break;
+        if (!gop.found_existing or !outer) gop.value_ptr.* = copy;
     }
     return d;
 }

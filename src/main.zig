@@ -110,4 +110,5 @@ test {
     _ = @import("core/ShellNames.zig");
     _ = @import("ai/Ai.zig");
     _ = @import("ai/Memory.zig");
+    _ = @import("core/RecentFolders.zig");
 }

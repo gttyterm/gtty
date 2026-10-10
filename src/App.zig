@@ -38,6 +38,7 @@ const commands = @import("ui/commands.zig");
 const tiling = @import("ui/tiling.zig");
 const Ai = @import("ai/Ai.zig");
 const Memory = @import("ai/Memory.zig");
+const RecentFolders = @import("core/RecentFolders.zig");
 
 const App = @This();
 
@@ -342,6 +343,13 @@ ai_return: ?ids_mod.Id = null,
 memory: Memory,
 memory_file: bool = false,
 memory_saved_ms: u64 = 0,
+/// The folders used lately (the recent chip): every job window's
+/// counted commands (`JobWindow.use_seq`); merged with the file shared by
+/// all gtty processes (`RecentFolders.sync`) only when `recent_file`
+/// (not in test scripts unless GTTY_RECENT says where).
+recent: RecentFolders,
+recent_file: bool = false,
+recent_synced_ms: u64 = 0,
 /// New Window: the new gtty's process, yielded the front to until this
 /// time (`tickFront`); in the new gtty, asking for the front until
 /// `front_until` (0: done).
@@ -412,9 +420,12 @@ pub fn create(gpa: std.mem.Allocator, opts: Options) !*App {
         .chip_hover_ms = opts.cfg.chip_hover_ms,
         .memory = .init(gpa),
         .memory_file = opts.save_config or c.getenv("GTTY_AI_MEMORY") != null,
+        .recent = .init(gpa),
+        .recent_file = opts.save_config or c.getenv("GTTY_RECENT") != null,
         .quit_on_last_shell = opts.cfg.quit_on_last_shell and (opts.script == null or opts.save_config),
     };
     if (app.memory_file) app.memory.load();
+    if (app.recent_file) app.recent.sync();
     menu_app = app;
     JobWindow.sync_hook = .{ .ctx = app, .f = syncMirror };
     FileOpener.enabled = opts.cfg.file_opener;
@@ -445,6 +456,8 @@ pub fn destroy(app: *App) void {
     app.ai_text.deinit(app.gpa);
     if (app.memory_file) app.memory.save();
     app.memory.deinit();
+    if (app.recent_file and app.recent.dirty) app.recent.sync();
+    app.recent.deinit();
     if (app.settings) |sw| sw.close();
     if (app.fetch) |*f| f.job.deinit(app.gpa);
     for (app.jobs.items) |w| w.destroy(&app.reaper);
@@ -570,6 +583,7 @@ pub fn run(app: *App) void {
         app.tickSettings();
         app.tickRemote();
         app.tickAi();
+        app.tickRecent();
         app.ensureShell();
         if (app.rec) |r| if (c.SDL_GetTicks() >= r.next) {
             app.dirty = true;
@@ -2424,6 +2438,7 @@ fn peekChip(w: *const JobWindow, kind: Peek.Kind) Gfx.Rect {
     return switch (kind) {
         .git => w.git_chip_r,
         .folder => w.folder_chip_r,
+        .recent => w.recent_chip_r,
     };
 }
 
@@ -2440,6 +2455,44 @@ fn openFolderPeek(app: *App, i: usize) void {
     w.folder_peek_open = true;
     app.layoutPeek();
     app.dirty = true;
+}
+
+/// Open the list of window `i`'s recent chip, expanded at once (closing
+/// any other peek): the folders used lately, newest file first (other
+/// gtty processes' uses come in with `sync`).
+fn openRecentPeek(app: *App, i: usize) void {
+    const w = app.jobs.items[i];
+    if (app.peek) |pk| if (pk.uid == w.uid and pk.kind == .recent) return;
+    app.closePeek();
+    app.hideTip();
+    app.chip_hover = null;
+    if (app.recent_file) {
+        app.recent.sync();
+        app.recent_synced_ms = c.SDL_GetTicks();
+    }
+    const home = if (c.getenv("HOME")) |h| std.mem.span(h) else "";
+    var buf: [RecentFolders.shown_max][]const u8 = undefined;
+    const list = app.recent.top(home, &buf);
+    app.peek = Peek.openRecent(app.gpa, w.uid, w.cwd(), list, w.recent_chip_r) catch return;
+    w.recent_peek_open = true;
+    app.layoutPeek();
+    app.dirty = true;
+}
+
+/// Each frame: a command that counts as a use (`JobWindow.use_seq`, not
+/// in a remote session) goes to the recent folders; the file is synced
+/// at most every 10 s.
+fn tickRecent(app: *App) void {
+    const home = if (c.getenv("HOME")) |h| std.mem.span(h) else "";
+    for (app.jobs.items) |w| if (w.use_seq != w.use_seen) {
+        w.use_seen = w.use_seq;
+        if (w.remoteDest().len == 0) app.recent.use(w.use_dir.items, home);
+    };
+    const now = c.SDL_GetTicks();
+    if (app.recent_file and app.recent.dirty and now -| app.recent_synced_ms > 10_000) {
+        app.recent_synced_ms = now;
+        app.recent.sync();
+    }
 }
 
 /// Open the peek of window `i`'s git chip (closing any other peek).
@@ -2464,6 +2517,7 @@ fn closePeek(app: *App) void {
     for (app.jobs.items) |w| if (w.uid == pk.uid) {
         w.git_peek_open = false;
         w.folder_peek_open = false;
+        w.recent_peek_open = false;
     };
     pk.deinit(&app.reaper);
     app.peek = null;
@@ -2529,6 +2583,7 @@ fn tickPeek(app: *App) void {
         .git => if (pk.state != .busy) if (w.branch()) |b| pk.setFull(b) else return app.closePeek(),
         // The shell went elsewhere (not by this peek): its list is stale.
         .folder => if (pk.state == .idle and !std.mem.eql(u8, w.cwd(), pk.full)) return app.closePeek(),
+        .recent => if (pk.state == .idle and !std.mem.eql(u8, w.cwd(), pk.dir)) return app.closePeek(),
     }
     switch (pk.tick(now, &app.reaper)) {
         .none => {},
@@ -3813,6 +3868,8 @@ fn clickJob(app: *App, i: usize, x: f32, y: f32, button: u8, clicks: u8) void {
         .git_chip => app.openGitPeek(i),
         // The folder chip: the folders above, at once.
         .folder_chip => app.openFolderPeek(i),
+        // The recent chip: its list, expanded at once.
+        .recent_chip => app.openRecentPeek(i),
         .minimize => app.minimizeJob(i),
         .maximize => app.toggleMaximize(i),
         // Anywhere else: the job becomes (or stays) the current job window.
@@ -5805,7 +5862,7 @@ fn render(app: *App) void {
     const job = app.focusedJob();
     const peek_keys = if (app.peek) |pk| pk.wantsKeys() else false;
     if (peek_keys) {
-        label = if (app.peek.?.kind == .folder) "typing goes to the folder filter — Esc closes it" else "typing goes to the branch filter — Esc closes it";
+        label = if (app.peek.?.kind != .git) "typing goes to the folder filter — Esc closes it" else "typing goes to the branch filter — Esc closes it";
     } else if (job) |w| {
         label = std.fmt.bufPrint(&label_buf, "typing goes to #{d} — click here or Ctrl+Tab for the gtty prompt", .{w.serial}) catch "›";
     }

@@ -161,6 +161,27 @@ the shell. Users expect it to behave like a shell in a terminal.
     `JobWindow.flashFolderChip`) / Open in Finder (Linux "Open in Files";
     `App.openFolder`, as the title bar's folder button). Test:
     `test/folderchip.gt`.
+  - **Recent chip** (added 2026-10-10; `recent_chip_r`, clock icon +
+    `recent`, after the git chip, hidden in a remote session): a click
+    opens its peek **already expanded** (`Peek.openRecent`, kind
+    `recent`, `App.openRecentPeek`; no hover peek, no copy / expand
+    buttons): up to 7 folders (`RecentFolders.shown_max`), most used
+    first (ties: newer), shown as `~/…`, the current one green, the
+    selection on the first other one; a pick = `Action.cd` as the folder
+    peek. **Use** = a command started in the folder (`Screen.cmd_seq` →
+    `JobWindow.use_seq` / `use_dir`, the folder reported at that prompt)
+    that isn't a look-up or bookkeeping (`RecentFolders.countsAsUse`:
+    not cd, ls family, find, pwd, du, echo, …); only folders strictly
+    under `$HOME` (`underHome`), none from ssh / mosh windows
+    (`App.tickRecent`). Kept: uses within 3 days of the newest use
+    (`window_s`, relative, so time away doesn't empty it), ≤ 200.
+    **File** (shared by all gtty processes): `$GTTY_RECENT`, else
+    `$XDG_STATE_HOME/gtty/recent-folders`, else
+    `~/.local/state/gtty/recent-folders` (0600, lines `uses\tlast\tpath`);
+    `RecentFolders.sync` re-reads it and adds only this process's new
+    uses (`Entry.added`), at start, on opening the list, ≤ every 10 s
+    while dirty, at exit; script runs only with `GTTY_RECENT`. Test:
+    `test/recent.gt`.
   - **Peek** (`src/ui/Peek.zig`, one at a time, `App.peek`): opens after
     0.5 s hover (`chip_hover_ms`) or a click; [copy] [expand ^] full branch
     [×]; grows up from the chip in the normal text size. Mouse away → 5 s
@@ -542,7 +563,12 @@ the shell. Users expect it to behave like a shell in a terminal.
   plain run misses, read again when the folder's mtime changes; added
   2026-10-07, `test/filenames.gt`; the mouse on a blank inside a name
   works too when the line goes on right of it, 2026-10-08,
-  `test/filenames-blank.gt`; up to 40 word edges each side, a wide
+  `test/filenames-blank.gt`; names that start / end with blanks
+  (` Buck Rogers E01.mp4`, 2026-10-10) are matched by the text shown
+  without them: DirCache keys = trimmed names → the real name
+  (`DirCache.find`, `Listed.realName`); the outline covers only the
+  visible text, the mark's path is the real name;
+  up to 40 word edges each side, a wide
   character's spacer cell is skipped: `Plug？ [27013].mp4`)
   → resolved against the window's folder → existing regular
   non-executable file → `mark` (text range), drawn dashed by the window

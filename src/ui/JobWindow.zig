@@ -38,6 +38,7 @@ const remote = @import("../core/remote.zig");
 const RemoteLink = @import("../core/RemoteLink.zig");
 const FileOpener = @import("FileOpener.zig");
 const FileFx = @import("FileFx.zig");
+const RecentFolders = @import("../core/RecentFolders.zig");
 const Rect = Gfx.Rect;
 
 const JobWindow = @This();
@@ -46,7 +47,7 @@ pub const Kind = enum { command, shell };
 
 /// `close` is the red × : close once finished; while running it opens the
 /// kill menu, and only `kill` (the skull in that menu) kills the job.
-pub const Hit = enum { none, title, close, kill, check, copy, zoom_in, zoom_out, colors, sync, files, minimize, maximize, scroller, git_chip, folder_chip, footer, out };
+pub const Hit = enum { none, title, close, kill, check, copy, zoom_in, zoom_out, colors, sync, files, minimize, maximize, scroller, git_chip, folder_chip, recent_chip, footer, out };
 
 /// The selection checkbox at the far left of the title (several windows
 /// in the windows area): hidden (one window shown), off (in the job grid),
@@ -128,6 +129,12 @@ folders_done: u32 = 0,
 ls_cmd_buf: [256]u8 = undefined,
 ls_cmd_len: usize = 0,
 cmd_seen: u32 = 0,
+/// A command that counts as a use of its folder started
+/// (`RecentFolders.countsAsUse`): bumped, with the folder it ran in;
+/// App's recent folders count it when it differs from `use_seen`.
+use_seq: u32 = 0,
+use_seen: u32 = 0,
+use_dir: std.ArrayList(u8) = .empty,
 /// gtty typed a cd (`cdTo`): once it ended well, list the new folder
 /// (`refresh_ls`).
 list_after_cd: bool = false,
@@ -281,11 +288,15 @@ chips_next_ms: u64 = 0,
 foot_r: Rect = .{},
 git_chip_r: Rect = .{},
 folder_chip_r: Rect = .{},
+/// The recent chip (the folders used lately; a click opens their list).
+recent_chip_r: Rect = .{},
 /// The mouse is over a chip / its peek is open (drawn lighter).
 over_git_chip: bool = false,
 git_peek_open: bool = false,
 over_folder_chip: bool = false,
 folder_peek_open: bool = false,
+over_recent_chip: bool = false,
+recent_peek_open: bool = false,
 
 pub fn create(gpa: std.mem.Allocator, gfx: *Gfx, uid: ids.Id, serial: u32, spec: Spec, rect: Rect, scale: Scale) !*JobWindow {
     const w = try gpa.create(JobWindow);
@@ -333,6 +344,7 @@ pub fn destroy(w: *JobWindow, reaper: *Process.Reaper) void {
     if (w.log) |*l| l.close(w.gpa);
     for (w.folders_left.items) |d| w.gpa.free(d);
     w.folders_left.deinit(w.gpa);
+    w.use_dir.deinit(w.gpa);
     for (w.links.items) |l| w.gpa.free(l.target);
     w.links.deinit(w.gpa);
     w.folder_now.deinit(w.gpa);
@@ -391,6 +403,12 @@ pub fn pump(w: *JobWindow, gfx: *Gfx) bool {
         if (isListing(cmd) and cmd.len <= w.ls_cmd_buf.len) {
             @memcpy(w.ls_cmd_buf[0..cmd.len], cmd);
             w.ls_cmd_len = cmd.len;
+        }
+        // The folder it runs in: the one reported at its prompt.
+        if (RecentFolders.countsAsUse(cmd) and w.folder_now.items.len > 0) {
+            w.use_dir.clearRetainingCapacity();
+            w.use_dir.appendSlice(w.gpa, w.folder_now.items) catch {};
+            w.use_seq +%= 1;
         }
     }
     // A command in the shell ended: its output, if plain, gets its folder
@@ -968,9 +986,9 @@ pub fn relayout(w: *JobWindow, gfx: *Gfx) !void {
     w.layoutChips(gfx);
 }
 
-/// Text size of the chips: the status bar's small text.
+/// Text size of the chips: the text size.
 fn chipPx(scale: Scale) u16 {
-    return @intFromFloat(@round(@as(f32, @floatFromInt(scale.base_px)) * 0.85));
+    return scale.base_px;
 }
 
 pub fn chipFace(gfx: *Gfx, scale: Scale) !*Gfx.Face {
@@ -986,6 +1004,9 @@ pub fn footHeight(gfx: *Gfx, scale: Scale) f32 {
 /// The git chip's text outside a git repo (dimmed, no peek).
 const no_git_label = "git";
 
+/// The recent chip's text.
+const recent_label = "recent";
+
 /// Longest branch name shown on the chip; the peek shows all of it.
 const chip_max_chars = 32;
 
@@ -993,10 +1014,11 @@ const chip_max_chars = 32;
 /// runs: the folder chip first (the folder's name; not in a remote
 /// session, where the local folder means nothing), then the git chip,
 /// always there: the branch inside a git repo, else dimmed (`no_git_label`,
-/// no peek).
+/// no peek); then the recent chip (not in a remote session either).
 fn layoutChips(w: *JobWindow, gfx: *Gfx) void {
     w.git_chip_r = .{};
     w.folder_chip_r = .{};
+    w.recent_chip_r = .{};
     if (w.grid_r != null or !w.proc.running()) return;
     const f = chipFace(gfx, w.scale) catch return;
     const ui = w.scale.ui;
@@ -1009,6 +1031,8 @@ fn layoutChips(w: *JobWindow, gfx: *Gfx) void {
         x += w.folder_chip_r.w + @round(6 * ui);
     };
     w.git_chip_r = .{ .x = x, .y = y, .w = chipWidth(f, ui, w.branch() orelse no_git_label), .h = h };
+    x += w.git_chip_r.w + @round(6 * ui);
+    if (w.remote_len == 0) w.recent_chip_r = .{ .x = x, .y = y, .w = chipWidth(f, ui, recent_label), .h = h };
 }
 
 fn chipWidth(f: *const Gfx.Face, ui: f32, label: []const u8) f32 {
@@ -1495,6 +1519,7 @@ pub fn hit(w: *const JobWindow, x: f32, y: f32) Hit {
     if (w.grid_r == null and w.scrollThumb() != null and w.scrollerHitR().contains(x, y)) return .scroller;
     if (w.git_chip_r.contains(x, y)) return .git_chip;
     if (w.folder_chip_r.contains(x, y)) return .folder_chip;
+    if (w.recent_chip_r.contains(x, y)) return .recent_chip;
     if (w.grid_r == null and w.foot_r.contains(x, y)) return .footer;
     return .out;
 }
@@ -1523,8 +1548,7 @@ pub fn tip(w: *const JobWindow, h: Hit) ?struct { text: []const u8, r: Rect } {
         } },
         .files => .{ .r = w.files_r, .text = if (w.remote_len > 0)
             "Remote folder: not yet"
-        else
-            if (@import("builtin").os.tag == .macos) "Open this folder in Finder" else "Open this folder in the file manager" },
+        else if (@import("builtin").os.tag == .macos) "Open this folder in Finder" else "Open this folder in the file manager" },
         else => null,
     };
 }
@@ -1581,10 +1605,10 @@ fn tickRest(w: *JobWindow, gfx: *Gfx, now: u64) bool {
     if (!w.proc.running() and w.link_pid != 0) w.endRemote();
     if (w.grid_r == null and w.proc.running() and now >= w.chips_next_ms) {
         w.chips_next_ms = now + chips_refresh_ms;
-        const before = .{ w.git_chip_r, w.folder_chip_r };
+        const before = .{ w.git_chip_r, w.folder_chip_r, w.recent_chip_r };
         chips = w.refreshChips() or chips;
         w.layoutChips(gfx);
-        if (!std.meta.eql(before, .{ w.git_chip_r, w.folder_chip_r })) chips = true;
+        if (!std.meta.eql(before, .{ w.git_chip_r, w.folder_chip_r, w.recent_chip_r })) chips = true;
     }
     // Moving: redraw every frame; done after `anim_len_ms`.
     if (w.anim_from != null) {
@@ -1895,10 +1919,12 @@ pub fn hover(w: *JobWindow, pt: ?[2]f32) bool {
     const part: Hit = if (pt) |p| w.hit(p[0], p[1]) else .none;
     const over_chip = part == .git_chip;
     const over_folder = part == .folder_chip;
-    const changed = over != w.over_scroller or over_chip != w.over_git_chip or over_folder != w.over_folder_chip;
+    const over_recent = part == .recent_chip;
+    const changed = over != w.over_scroller or over_chip != w.over_git_chip or over_folder != w.over_folder_chip or over_recent != w.over_recent_chip;
     w.over_scroller = over;
     w.over_git_chip = over_chip;
     w.over_folder_chip = over_folder;
+    w.over_recent_chip = over_recent;
     return changed;
 }
 
@@ -2075,6 +2101,8 @@ fn drawFooter(w: *const JobWindow, gfx: *Gfx, theme: *const Theme) void {
     }
     if (w.folderName()) |name| if (w.folder_chip_r.w > 0)
         drawChip(gfx, theme, f, ui, w.folder_chip_r, name, w.over_folder_chip or w.folder_peek_open, .folder, true);
+    if (w.recent_chip_r.w > 0)
+        drawChip(gfx, theme, f, ui, w.recent_chip_r, recent_label, w.over_recent_chip or w.recent_peek_open, .recent, true);
     if (w.chip_flash_ms != 0) {
         const t = c.SDL_GetTicks() -| w.chip_flash_ms;
         if (t < name_flash_ms) {
@@ -2086,8 +2114,9 @@ fn drawFooter(w: *const JobWindow, gfx: *Gfx, theme: *const Theme) void {
 
 /// A chip: its icon and label (cut with … when long); lighter while the
 /// mouse is on it or its peek is open; dimmed when disabled.
-fn drawChip(gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, ui: f32, cr: Rect, label: []const u8, lit: bool, icon: enum { git, folder }, enabled: bool) void {
-    gfx.fill(cr, theme.title_bg.mix(theme.fg, if (lit) 0.16 else if (enabled) 0.06 else 0.02));
+fn drawChip(gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, ui: f32, cr: Rect, label: []const u8, lit: bool, icon: enum { git, folder, recent }, enabled: bool) void {
+    const bg = theme.title_bg.mix(theme.fg, if (lit) 0.16 else if (enabled) 0.06 else 0.02);
+    gfx.fill(cr, bg);
     const icon_col = if (enabled) theme.focus else theme.dim;
     const pad = @round(7 * ui);
     const iy = cr.y + @round((cr.h - f.cell_h) / 2);
@@ -2095,6 +2124,7 @@ fn drawChip(gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, ui: f32, cr: Rect, lab
     switch (icon) {
         .git => gitIcon(gfx, icon_col, ui, cr.x + pad, iy, iw, f.cell_h),
         .folder => folderIcon(gfx, icon_col, ui, cr.x + pad, iy, iw, f.cell_h),
+        .recent => clockIcon(gfx, icon_col, bg, ui, cr.x + pad, iy, iw, f.cell_h),
     }
     const tx = cr.x + pad + chipIconW(f, ui);
     const ty = cr.y + @round((cr.h - f.cell_h) / 2);
@@ -2110,6 +2140,20 @@ fn folderIcon(gfx: *Gfx, col: Rgb, ui: f32, x: f32, y: f32, w: f32, h: f32) void
     const body: Rect = .{ .x = x, .y = y + h * 0.18 + tab_h, .w = w, .h = h * 0.64 - tab_h };
     gfx.outline(body, col, t);
     gfx.fill(.{ .x = body.x, .y = body.y - tab_h, .w = @round(body.w * 0.45), .h = tab_h + t }, col);
+}
+
+/// A clock face with its hands at ten past (recent folders), centered in
+/// the `w` × `h` box on background `bg`.
+fn clockIcon(gfx: *Gfx, col: Rgb, bg: Rgb, ui: f32, x: f32, y: f32, w: f32, h: f32) void {
+    const t = @max(@round(h * 0.08), @max(@round(ui), 1));
+    const rad = @min(w, h * 0.72) / 2;
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    // The ring: a disc with a hole.
+    gfx.disc(cx, cy, rad, col);
+    gfx.disc(cx, cy, rad - t, bg);
+    gfx.line(cx, cy, cx, cy - rad * 0.62, col, t);
+    gfx.line(cx, cy, cx + rad * 0.48, cy, col, t);
 }
 
 /// Branching commits, a "Y": a first commit, then a joint commit where a

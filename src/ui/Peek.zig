@@ -13,6 +13,11 @@
 //!     selected). Picking one asks App to `cd` there (`Action.cd`, the
 //!     shell at its prompt only).
 //!
+//!   * **Recent chip** (`kind` recent): a click opens the list at once
+//!     (no copy / expand buttons): the folders under home used lately,
+//!     most used first (`RecentFolders`), the current one marked; picking
+//!     one cds there as the folder chip's list does.
+//!
 //!   * **Peek:** a plain floating box over the chip, in the normal text
 //!     size: [copy] [expand]  full branch name  [×]. The copy button
 //!     copies the text, which flashes white; a click on the text expands.
@@ -93,7 +98,7 @@ row_h: f32 = 1,
 rows: usize = 0,
 bar_h: f32 = 3,
 
-pub const Kind = enum { git, folder };
+pub const Kind = enum { git, folder, recent };
 pub const State = enum { idle, busy, ok, err };
 pub const Part = enum { none, copy, expand, close };
 
@@ -138,6 +143,38 @@ pub fn openFolder(gpa: std.mem.Allocator, uid: ids.Id, dir: []const u8, anchor: 
     }
     p.refilter();
     return p;
+}
+
+/// The recent chip's list, already expanded: `folders` (most used
+/// first), `dir` (the window's folder) marked when among them.
+pub fn openRecent(gpa: std.mem.Allocator, uid: ids.Id, dir: []const u8, folders: []const []const u8, anchor: Rect) !Peek {
+    var p = try open(gpa, uid, dir, "recent folders", anchor);
+    errdefer p.deinit(undefined);
+    p.kind = .recent;
+    p.expanded = true;
+    for (folders) |f| {
+        const copy = try gpa.dupe(u8, f);
+        p.branches.append(gpa, copy) catch {
+            gpa.free(copy);
+            return error.OutOfMemory;
+        };
+    }
+    p.refilter();
+    return p;
+}
+
+/// The marked entry: the current branch, or the window's folder.
+fn currentName(p: *const Peek) []const u8 {
+    return if (p.kind == .git) p.full else p.dir;
+}
+
+/// How a folder of the recent list shows (and is filtered): under home
+/// without it (drawn after a `~`); others as they are.
+fn homeRel(p: *const Peek, name: []const u8) ?[]const u8 {
+    if (p.kind != .recent) return null;
+    const home = std.mem.trimEnd(u8, std.mem.span(c.getenv("HOME") orelse return null), "/");
+    if (home.len == 0 or !std.mem.startsWith(u8, name, home) or name.len <= home.len or name[home.len] != '/') return null;
+    return name[home.len..];
 }
 
 /// The folder picked (`Action.cd`): the shell went there (green, closes
@@ -204,8 +241,8 @@ fn pick(p: *Peek) Action {
     p.gpa.free(p.target);
     p.target = p.gpa.dupe(u8, name) catch &.{};
     p.state_ms = c.SDL_GetTicks();
-    p.already = std.mem.eql(u8, name, p.full);
-    if (p.kind == .folder and !p.already) return .cd;
+    p.already = std.mem.eql(u8, name, p.currentName());
+    if (p.kind != .git and !p.already) return .cd;
     if (p.already) {
         p.state = .ok; // nothing to do
         return .redraw;
@@ -261,7 +298,7 @@ pub fn errorLine(p: *const Peek) []const u8 {
 fn refilter(p: *Peek) void {
     p.shown.clearRetainingCapacity();
     for (p.branches.items, 0..) |b, i| {
-        if (p.filter.items.len == 0 or std.ascii.indexOfIgnoreCase(b, p.filter.items) != null)
+        if (p.filter.items.len == 0 or std.ascii.indexOfIgnoreCase(p.homeRel(b) orelse b, p.filter.items) != null)
             p.shown.append(p.gpa, i) catch break;
     }
     p.sel = 0;
@@ -272,6 +309,8 @@ fn refilter(p: *Peek) void {
         if (std.mem.eql(u8, p.branches.items[i], p.full)) p.sel = k;
     };
     if (p.kind == .folder and p.filter.items.len == 0) p.sel = p.shown.items.len -| 2;
+    // Recent: the first one that isn't the current folder.
+    if (p.kind == .recent and p.shown.items.len > 1 and std.mem.eql(u8, p.branches.items[p.shown.items[0]], p.currentName())) p.sel = 1;
     p.keepSelVisible();
 }
 
@@ -461,7 +500,13 @@ pub fn layout(p: *Peek, f: *const Gfx.Face, sf: *const Gfx.Face, ui: f32, bounds
     p.copy_r = .{ .x = x + pad, .y = iy, .w = icon, .h = icon };
     p.expand_r = .{ .x = p.copy_r.x + icon + gap, .y = iy, .w = icon, .h = icon };
     p.close_r = .{ .x = x + w - pad - icon, .y = iy, .w = icon, .h = icon };
-    const tx = p.expand_r.x + icon + 2 * gap;
+    var tx = p.expand_r.x + icon + 2 * gap;
+    // Recent: only a title, nothing to copy or fold.
+    if (p.kind == .recent) {
+        p.copy_r = .{};
+        p.expand_r = .{};
+        tx = x + pad + gap;
+    }
     p.text_r = .{ .x = tx, .y = y, .w = @max(p.close_r.x - 2 * gap - tx, 0), .h = head_h };
 
     var cy = y + head_h;
@@ -483,13 +528,15 @@ pub fn draw(p: *const Peek, gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, sf: *G
     gfx.fill(b, theme.title_bg);
 
     // Header: [copy] [expand]  full text  [×]
-    JobWindow.copyIcon(gfx, p.copy_r, theme, ui);
-    if (p.over == .copy) gfx.outline(p.copy_r, theme.title_fg, t);
-    expandIcon(gfx, p.expand_r, theme, ui, p.expanded, p.over == .expand);
+    if (p.kind != .recent) {
+        JobWindow.copyIcon(gfx, p.copy_r, theme, ui);
+        if (p.over == .copy) gfx.outline(p.copy_r, theme.title_fg, t);
+        expandIcon(gfx, p.expand_r, theme, ui, p.expanded, p.over == .expand);
+    }
     JobWindow.closeIcon(gfx, p.close_r, theme, ui);
     gfx.clip(p.text_r);
     const hy = p.text_r.y + @round((p.text_r.h - f.cell_h) / 2);
-    const tend = gfx.text(f, p.text_r.x, hy, p.full, theme.prompt_fg);
+    const tend = gfx.text(f, p.text_r.x, hy, p.full, if (p.kind == .recent) theme.title_fg else theme.prompt_fg);
     if (p.flash_ms != 0) {
         const ft = now -| p.flash_ms;
         if (ft < flash_len_ms) {
@@ -520,7 +567,7 @@ pub fn draw(p: *const Peek, gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, sf: *G
         const lr = p.list_r;
         gfx.clip(lr);
         if (p.shown.items.len == 0) {
-            const msg = if (p.kind == .folder) (if (p.branches.items.len == 0) "no folder above" else "no folder matches") else if (p.list_run != null) "loading branches…" else if (p.branches.items.len == 0) "no local branches" else "no branch matches";
+            const msg = if (p.kind == .recent) (if (p.branches.items.len == 0) "no recent folders yet" else "no folder matches") else if (p.kind == .folder) (if (p.branches.items.len == 0) "no folder above" else "no folder matches") else if (p.list_run != null) "loading branches…" else if (p.branches.items.len == 0) "no local branches" else "no branch matches";
             _ = gfx.text(f, lr.x + f.cell_w * 2, lr.y + @round((p.row_h - f.cell_h) / 2), msg, theme.dim);
         }
         var k = p.top;
@@ -530,13 +577,17 @@ pub fn draw(p: *const Peek, gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, sf: *G
             const row: Rect = .{ .x = lr.x, .y = ry, .w = lr.w, .h = p.row_h };
             if (k == p.sel) gfx.fill(row, theme.selection) else if (p.hover_row == k) gfx.fill(row, theme.title_bg.mix(theme.fg, 0.08));
             const ty = ry + @round((p.row_h - f.cell_h) / 2);
-            const current = std.mem.eql(u8, name, p.full);
+            const current = std.mem.eql(u8, name, p.currentName());
             if (current) {
                 const d = @round(f.cell_h * 0.32);
                 gfx.disc(lr.x + f.cell_w * 0.9, ry + p.row_h / 2, d / 2, theme.ok);
             }
             const switching = p.state == .busy and std.mem.eql(u8, name, p.target);
-            _ = gfx.text(f, lr.x + f.cell_w * 2, ty, name, if (current) theme.ok else if (switching) theme.focus else theme.prompt_fg);
+            const col = if (current) theme.ok else if (switching) theme.focus else theme.prompt_fg;
+            if (p.homeRel(name)) |rel| {
+                const tx = gfx.text(f, lr.x + f.cell_w * 2, ty, "~", col);
+                _ = gfx.text(f, tx, ty, rel, col);
+            } else _ = gfx.text(f, lr.x + f.cell_w * 2, ty, name, col);
         }
         gfx.clip(null);
         // More rows than fit: a thin scroll mark on the right.
@@ -553,7 +604,7 @@ pub fn draw(p: *const Peek, gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, sf: *G
         gfx.clip(p.msg_r);
         switch (p.state) {
             .busy => _ = gfx.text(sf, p.msg_r.x, p.msg_r.y, "switching…", theme.focus),
-            .ok => _ = gfx.text(sf, p.msg_r.x, p.msg_r.y, if (p.kind == .folder) (if (p.already) "already here" else "cd sent") else if (p.already) "already on this branch" else "switched", theme.ok),
+            .ok => _ = gfx.text(sf, p.msg_r.x, p.msg_r.y, if (p.kind != .git) (if (p.already) "already here" else "cd sent") else if (p.already) "already on this branch" else "switched", theme.ok),
             .err => {
                 var y = p.msg_r.y;
                 var it = std.mem.splitScalar(u8, p.err_msg.items, '\n');
@@ -584,7 +635,7 @@ pub fn draw(p: *const Peek, gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, sf: *G
 }
 
 fn filterHint(p: *const Peek) []const u8 {
-    return if (p.kind == .folder) "filter folders" else "filter branches";
+    return if (p.kind != .git) "filter folders" else "filter branches";
 }
 
 /// A chevron: up (grow into the list) while collapsed, down once expanded.
@@ -663,4 +714,27 @@ test "folder peek: the mouse onto the expand button expands it, so does a click 
     p.expanded = false;
     _ = p.motion(25, 5, 2);
     try t.expect(p.expanded);
+}
+
+test "recent peek: opens expanded, starts past the current folder, filters without home" {
+    const t = std.testing;
+    const home = std.mem.span(c.getenv("HOME") orelse return);
+    var b1: [256]u8 = undefined;
+    var b2: [256]u8 = undefined;
+    const a = try std.fmt.bufPrint(&b1, "{s}/src/gtty", .{home});
+    const b = try std.fmt.bufPrint(&b2, "{s}/docs", .{home});
+    var p = try Peek.openRecent(t.allocator, 1, a, &.{ a, b }, .{});
+    var reaper: Process.Reaper = .{ .gpa = t.allocator };
+    defer reaper.deinit();
+    defer p.deinit(&reaper);
+    try t.expect(p.wantsKeys());
+    try t.expectEqual(@as(usize, 1), p.sel);
+    try t.expectEqual(Action.cd, p.key(c.SDLK_RETURN));
+    try t.expectEqualStrings(b, p.target);
+    // The home folder's own name doesn't match every row.
+    const base = std.fs.path.basename(home);
+    if (base.len > 0 and std.ascii.indexOfIgnoreCase("/src/gtty/docs", base) == null) {
+        p.text(base);
+        try t.expectEqual(@as(usize, 0), p.shown.items.len);
+    }
 }

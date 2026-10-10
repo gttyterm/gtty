@@ -204,20 +204,30 @@ fn find(fo: *FileOpener, w: *JobWindow, pos: Screen.TextPos, is_remote: bool) vo
     fo.pending = null;
     var fbuf: [4096]u8 = undefined;
     const dir = w.folder(&fbuf);
-    if (dir.len > 0) if (path.longestKnown(line, pos.col, Listed{ .dir = dir }, Listed.known)) |*cand| {
-        if (fo.tryName(w, pos, cand, dir)) return;
+    const l: Listed = .{ .dir = dir };
+    var nbuf: [4096]u8 = undefined;
+    if (dir.len > 0) if (path.longestKnown(line, pos.col, l, Listed.known)) |*cand| {
+        const real = l.realName(cand.text(), &nbuf) orelse cand.text();
+        if (fo.tryName(w, pos, cand, dir, real)) return;
     };
-    for (list.slice()) |*cand| if (fo.tryName(w, pos, cand, dir)) return;
+    for (list.slice()) |*cand| {
+        if (fo.tryName(w, pos, cand, dir, cand.text())) return;
+        // A name that starts / ends with blanks, shown without them.
+        if (dir.len > 0) if (l.realName(cand.text(), &nbuf)) |real| {
+            if (fo.tryName(w, pos, cand, dir, real)) return;
+        };
+    }
 }
 
-/// Candidate `cand` resolved against `dir`: an existing file (a folder at
-/// a shell's prompt, or while dropping) → the mark. True: found.
-fn tryName(fo: *FileOpener, w: *JobWindow, pos: Screen.TextPos, cand: *const path.Candidate, dir: []const u8) bool {
+/// Name `text`, outlined at `cand`'s columns, resolved against `dir`: an
+/// existing file (a folder at a shell's prompt, or while dropping) → the
+/// mark. True: found.
+fn tryName(fo: *FileOpener, w: *JobWindow, pos: Screen.TextPos, cand: *const path.Candidate, dir: []const u8, text: []const u8) bool {
     var m: Mark = .{ .range = .{
         .start = .{ .line = pos.line, .col = cand.start },
         .end = .{ .line = pos.line, .col = cand.end },
     } };
-    m.len = (resolve(&m.buf, dir, cand.text()) orelse return false).len;
+    m.len = (resolve(&m.buf, dir, text) orelse return false).len;
     switch (kindOf(m.buf[0..m.len :0])) {
         .none => return false,
         .file => if (drop_mode) return false,
@@ -234,23 +244,39 @@ fn tryName(fo: *FileOpener, w: *JobWindow, pos: Screen.TextPos, cand: *const pat
 /// punctuation in a folder's listing? `My File.txt`: in the window's
 /// folder; `docs/My File.txt`, `~/x/a b`: in that folder. A plain name
 /// under a folder with blanks (`My Dir/notes.txt`) isn't in any listing
-/// (only the names a run misses are): checked on disk.
+/// (only the names a run misses are): checked on disk. The listing is
+/// asked with the text as shown, without the blanks a name may start /
+/// end with (`realName`).
 const Listed = struct {
     dir: []const u8,
 
     fn known(l: Listed, text: []const u8) bool {
-        const slash = std.mem.lastIndexOfScalar(u8, text, '/') orelse
-            return DirCache.has(l.dir, text);
-        const name = text[slash + 1 ..];
+        const slash = std.mem.lastIndexOfScalar(u8, text, '/');
+        const name = if (slash) |i| text[i + 1 ..] else text;
         if (name.len == 0) return false;
         var buf: [4096]u8 = undefined;
-        if (!path.specialName(name)) {
+        if (slash != null and !path.specialName(name)) {
             const full = resolve(&buf, l.dir, text) orelse return false;
             return kindOf(full) != .none;
         }
-        const parent = if (slash == 0) "/" else text[0..slash];
-        const pdir = resolve(&buf, l.dir, parent) orelse return false;
-        return DirCache.has(pdir, name);
+        return l.realName(text, &buf) != null;
+    }
+
+    /// `text` with its last part replaced by the folder listing's name
+    /// for it (` Buck Rogers E01.mp4` for `Buck Rogers E01.mp4`). Null:
+    /// not in the listing.
+    fn realName(l: Listed, text: []const u8, buf: []u8) ?[]const u8 {
+        const slash = std.mem.lastIndexOfScalar(u8, text, '/');
+        const name = if (slash) |i| text[i + 1 ..] else text;
+        if (name.len == 0) return null;
+        var pbuf: [4096]u8 = undefined;
+        const pdir = if (slash) |i|
+            resolve(&pbuf, l.dir, if (i == 0) "/" else text[0..i]) orelse return null
+        else
+            l.dir;
+        const real = DirCache.find(pdir, name) orelse return null;
+        const head = if (slash) |i| text[0 .. i + 1] else "";
+        return std.fmt.bufPrint(buf, "{s}{s}", .{ head, real }) catch null;
     }
 };
 
