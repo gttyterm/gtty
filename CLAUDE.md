@@ -912,16 +912,18 @@ decisions; items marked *open* are undecided.
   `permissions: {}`, the job asks for `contents: write` explicitly; run by
   hand = the same build as an artifact, no release).
 - **Releases** (two channels, from the tag's MINOR; tags
-  `vMAJOR.MINOR.PATCH`, only `main` lives long): **odd minor = edge**
-  (features being tested; GitHub pre-release, not latest; environment
-  `edge`), **even minor = stable** (normal release, latest; environment
-  `release`). PATCH = fixes within that minor. Edge tags go on main
-  commits. **Promote** a tested edge build by tagging its commit with the
-  next even minor, no merge (CI refuses a stable x.y.0 on a commit
-  without an edge tag): `git tag -a v1.10.0 v1.9.2 -m v1.10.0 && git push
-  origin v1.10.0`. Fixes for a stable line once main has moved on: a
-  `release/X.Y` branch from that stable tag, tagged x.y.1, x.y.2, … (no
-  edge-tag check for PATCH > 0). The Finder layout
+  `vMAJOR.MINOR.PATCH`; two long-lived branches, `develop` and `main`,
+  decided 2026-10-10): **odd minor = edge** (features being tested;
+  GitHub pre-release, not latest; environment `edge`; tags on
+  `develop`), **even minor = stable** (normal release, latest;
+  environment `release`; tags on `main`). CI refuses a tag whose commit
+  isn't on its branch (`git merge-base --is-ancestor`). PATCH = fixes
+  within that minor. **Promote:** on develop set build.zig.zon to
+  x.(even).0, `git switch main && git merge --no-ff develop`, `git tag
+  -a v1.10.0 -m v1.10.0 && git push origin main v1.10.0`, then bump
+  develop to the next edge version. **Stable fix:** a commit on main
+  with the version bumped to x.y.N+1, tagged, then main merged into
+  develop. The Finder layout
   of the dmg needs Automation access on the runner; if it fails the dmg
   is unarranged (warning only).
 - Keep platform-specific C in `src/sys/`; keep `@cImport` only in `src/c.zig`.

@@ -9,12 +9,18 @@
 # Two channels, from the tag's MINOR number:
 #   odd  (v1.9.2)  edge:   environment "edge", a pre-release, not latest;
 #   even (v1.10.0) stable: environment "release", a normal release, latest.
-# A stable x.y.0 must be tagged on a commit that already has an edge tag
-# (promote a tested edge build, no merge):
 #
-#   git tag -a v1.10.0 v1.9.2 -m v1.10.0 && git push origin v1.10.0
+# Two long-lived branches: develop (edge) and main (stable). An edge tag
+# must be on develop, a stable tag on main.
 #
-# Stable fixes (x.y.N, N > 0) may come from a release/X.Y branch.
+# Promote: on develop set build.zig.zon to x.(even).0, merge --no-ff into
+# main, tag there, then bump develop to the next edge version:
+#
+#   git switch main && git merge --no-ff develop
+#   git tag -a v1.10.0 -m v1.10.0 && git push origin main v1.10.0
+#
+# Stable fix: commit on main with the version bumped to x.y.N+1, tag it,
+# then merge main into develop.
 #
 # Run by hand (Actions → Release → Run workflow): the same build, signed
 # and notarized, kept as a workflow artifact only; no release, no tag.
@@ -69,27 +75,19 @@ jobs:
             exit 1
           fi
           minor=${BASH_REMATCH[2]}
-          patch=${BASH_REMATCH[3]}
           if (( 10#$minor % 2 == 1 )); then
-            echo "$TAG: edge (odd minor), pre-release"
-            echo "env=edge" >> "$GITHUB_OUTPUT"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-            exit 0
+            chan=edge env=edge prerelease=true branch=develop
+          else
+            chan=stable env=release prerelease=false branch=main
           fi
-          echo "$TAG: stable (even minor)"
-          echo "env=release" >> "$GITHUB_OUTPUT"
-          echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          # A new stable line (x.y.0) promotes a tested edge build: the
-          # same commit must carry an edge tag. Fixes (x.y.N, N > 0) may
-          # come from a release/X.Y branch: no check.
-          if (( 10#$patch == 0 )); then
-            edge=$(git tag --points-at "$GITHUB_SHA" | grep -E '^v[0-9]+\.[0-9]*[13579]\.[0-9]+$' || true)
-            if [ -z "$edge" ]; then
-              echo "::error::stable tag $TAG must be on a commit that already has an edge tag (odd minor); tags here: $(git tag --points-at "$GITHUB_SHA" | tr '\n' ' ')"
-              exit 1
-            fi
-            echo "promotes edge: $edge"
+          echo "$TAG: $chan ($env, pre-release: $prerelease)"
+          # Edge tags go on develop, stable tags on main.
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$branch"; then
+            echo "::error::$TAG is a $chan tag: its commit must be on $branch"
+            exit 1
           fi
+          echo "env=$env" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
   release:
     name: Build, sign, notarize, publish
