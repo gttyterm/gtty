@@ -180,7 +180,8 @@ jobs:
             flags=(--prerelease=false --latest)
           fi
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" "${flags[@]}"
+            # Deleting a tag turns its release into a draft: publish it.
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false "${flags[@]}"
             gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}"
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
