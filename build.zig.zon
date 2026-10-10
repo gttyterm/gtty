@@ -3,7 +3,7 @@
 
 .{
     .name = .gtty,
-    .version = "1.6.0",
+    .version = "1.5.10",
     .fingerprint = 0xb6c7a54069045c3b,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
