@@ -76,6 +76,9 @@ const zshenv =
     \\  # the prompt after everything else in precmd has set it.
     \\  __gtty_prompt_end() { [[ $PS1 == *$'\e]133;B\a'* ]] || PS1+=$'%{\e]133;B\a%}' }
     \\  __gtty_hooks() {
+    \\    # The lists may not exist yet (and `setopt nounset` must not trip).
+    \\    (( ${+preexec_functions} )) || preexec_functions=()
+    \\    (( ${+precmd_functions} )) || precmd_functions=()
     \\    preexec_functions=(__gtty_preexec ${preexec_functions:#__gtty_preexec})
     \\    precmd_functions=(__gtty_precmd ${${precmd_functions:#__gtty_precmd}:#__gtty_prompt_end} __gtty_prompt_end)
     \\  }
@@ -127,7 +130,7 @@ const bashrc =
     \\# A paste shows as typed text, not highlighted (bash 5.1+; the user's
     \\# own config can turn it back on).
     \\bind 'set enable-active-region off' 2>/dev/null
-    \\if [ -n "$GTTY_BASH_LOGIN" ]; then
+    \\if [ -n "${GTTY_BASH_LOGIN:-}" ]; then
     \\  unset GTTY_BASH_LOGIN
     \\  [ -r /etc/profile ] && . /etc/profile
     \\  if [ -r ~/.bash_profile ]; then . ~/.bash_profile
@@ -139,23 +142,24 @@ const bashrc =
     \\fi
     \\__gtty_ready=
     \\__gtty_preexec() {
-    \\  [ -n "$__gtty_ready" ] || return 0
-    \\  [ -n "$COMP_LINE" ] && return 0
+    \\  [ -n "${__gtty_ready:-}" ] || return 0
+    \\  # Completion running (COMP_LINE is only set then).
+    \\  [ -n "${COMP_LINE:-}" ] && return 0
     \\  # Inside PROMPT_COMMAND (an empty line runs it again): not a command.
-    \\  [ -n "$__gtty_in_prompt" ] && return 0
+    \\  [ -n "${__gtty_in_prompt:-}" ] && return 0
     \\  case "$BASH_COMMAND" in __gtty_status=*) return 0 ;; esac
     \\  __gtty_ready=
     \\  printf '\033]133;C\007'
     \\}
     \\__gtty_precmd() {
-    \\  printf '\033]133;D;%s\007\033]7;file://%s%s\007' "$__gtty_status" "$HOSTNAME" "${PWD//\%/%25}"
+    \\  printf '\033]133;D;%s\007\033]7;file://%s%s\007' "${__gtty_status:-}" "${HOSTNAME:-}" "${PWD//\%/%25}"
     \\  __gtty_in_prompt=
     \\  __gtty_ready=1
     \\  __gtty_prompt_end
     \\}
     \\# The end of the prompt (OSC 133 B: what follows is typed).
     \\__gtty_prompt_end() {
-    \\  case "$PS1" in *'133;B'*) ;; *) PS1="$PS1"'\[\033]133;B\007\]' ;; esac
+    \\  case "${PS1:-}" in *'133;B'*) ;; *) PS1="${PS1:-}"'\[\033]133;B\007\]' ;; esac
     \\}
     \\# gtty's AI: run its script N in a subshell (`gtty-ai N 'request'`).
     \\gtty-ai() { ( builtin . "@DIR@/ai-$1.sh" ); }
@@ -163,8 +167,8 @@ const bashrc =
     \\  # bash-preexec (atuin, starship, …) owns the DEBUG trap and
     \\  # PROMPT_COMMAND: hook in through it.
     \\  __gtty_bp_preexec() { printf '\033]133;C\007'; }
-    \\  __gtty_bp_precmd() { printf '\033]133;D;%s\007\033]7;file://%s%s\007' "$?" "$HOSTNAME" "${PWD//\%/%25}"; }
-    \\  precmd_functions=(__gtty_bp_precmd "${precmd_functions[@]}" __gtty_prompt_end)
+    \\  __gtty_bp_precmd() { printf '\033]133;D;%s\007\033]7;file://%s%s\007' "$?" "${HOSTNAME:-}" "${PWD//\%/%25}"; }
+    \\  precmd_functions=(__gtty_bp_precmd ${precmd_functions[@]+"${precmd_functions[@]}"} __gtty_prompt_end)
     \\  preexec_functions+=(__gtty_bp_preexec)
     \\else
     \\  # A DEBUG trap the user's config set keeps running, first (it may
@@ -177,7 +181,7 @@ const bashrc =
     \\    trap '__gtty_preexec' DEBUG
     \\  fi
     \\  unset __gtty_prior
-    \\  PROMPT_COMMAND=$'__gtty_status=$? __gtty_in_prompt=1\n'"${PROMPT_COMMAND}"$'\n__gtty_precmd'
+    \\  PROMPT_COMMAND=$'__gtty_status=$? __gtty_in_prompt=1\n'"${PROMPT_COMMAND:-}"$'\n__gtty_precmd'
     \\fi
     \\
 ;

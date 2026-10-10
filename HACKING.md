@@ -26,10 +26,14 @@ files stay outside the repo, in `$GTTY_SIGNING_DIR`, default `~/tmp`).
 `release` for CI. Details in CLAUDE.md ("Signed releases").
 
 CI (`.github/workflows/ci.yml`) builds and runs the unit tests on Linux
-and macOS for every push and pull request. A release is a tag:
-`git tag v<version> && git push origin v<version>` (the version in
-`build.zig.zon`); `.github/workflows/release.yml` builds, signs,
-notarizes and publishes the packages as a GitHub release.
+and macOS for every pull request (a push to main runs nothing). A release
+is a pushed tag `v<version>` (the version in `build.zig.zon`);
+`.github/workflows/release.yml` builds, signs, notarizes and publishes
+the GitHub release with the packages. Odd minor (v1.9.x) = edge, a
+pre-release; even minor (v1.10.x) = stable. A stable line starts by
+tagging a tested edge commit, e.g. `git tag -a v1.10.0 v1.9.2 -m v1.10.0
+&& git push origin v1.10.0`; stable fixes go on a `release/X.Y` branch
+when main has moved on. Details in CLAUDE.md ("Releases").
 
 Not yet: full-screen programs (vim, htop, less), bold/italic, and scrolling back past the memory window. New commands from the
 prompt still start in gtty's own folder (a shell window's `cd` doesn't carry
@@ -47,8 +51,7 @@ hooks (slash only): `/wait <ms>`, `/shot <file.bmp>`, `/type <text>` (text +
 Enter), `/text <text>` (no Enter), `/key <keys>` (e.g. `cmd+v`,
 `ctrl+shift+left`), `/click <x> <y>`, `/rclick <x> <y>`, `/dclick <x> <y>`,
 `/down <x> <y>`, `/up <x> <y>`, `/move <x> <y>`, `/drag <x1> <y1> <x2> <y2>`, `/resize <w> <h>`, `/mods cmd+shift | none`
-(modifier keys held), `/menu run | settings | copy |
-paste | select-all | new-shell | new-window | sync-typing | about` (a menu pick), `/target main | settings` (which OS window the
+(modifier keys held), `/menu run | settings | new-shell | new-window | sync-typing | about` (a menu pick), `/target main | settings` (which OS window the
 next clicks, keys and shots go to), `/quit`. For demos: `/record start
 <dir> [fps]` … `/record stop` (frames + their times, with a drawn mouse
 pointer), `/slow <text>` (typed one character at a time), `/glide <x> <y>
@@ -109,7 +112,8 @@ src/
                       options, remote scripts (pure, unit-tested)
   core/RemoteLink.zig gtty's own connection to the remote machine; Fetch
   core/Config.zig     settings file (~/.config/gtty/config): load, save
-  sys/gtty_menu.m     gtty / Edit in the macOS menu bar (gtty_menu.c: none)
+  sys/gtty_menu.m     gtty in the macOS menu bar (gtty_menu.c: none)
+  sys/gtty_trash.m    Move to Trash (NSFileManager; gtty_trash.c: gio / trash-put / kioclient)
   ui/tiling.zig       how many windows fit in the windows area, and where
   core/git.zig        current branch from .git/HEAD; git commands in the background
   ui/commands.zig     gtty command parser (`name`, `/name`)

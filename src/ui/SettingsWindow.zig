@@ -36,6 +36,8 @@ pub const Change = union(enum) {
     colors_reset,
     marks,
     file_opener,
+    color_folders,
+    refresh_ls,
     quit_on_last_shell,
     /// An AI setting (read at each request).
     ai,
@@ -65,6 +67,8 @@ const Ctl = union(enum) {
     colors_reset,
     marks,
     file_opener,
+    color_folders,
+    refresh_ls,
     quit_on_last_shell,
     ai_provider,
     ai_memory,
@@ -279,6 +283,14 @@ pub fn onClick(s: *SettingsWindow, x: f32, y: f32) void {
             s.cfg.file_opener = !s.cfg.file_opener;
             s.changed(.file_opener);
         },
+        .color_folders => {
+            s.cfg.color_folders = !s.cfg.color_folders;
+            s.changed(.color_folders);
+        },
+        .refresh_ls => {
+            s.cfg.refresh_ls = !s.cfg.refresh_ls;
+            s.changed(.refresh_ls);
+        },
         .quit_on_last_shell => {
             s.cfg.quit_on_last_shell = !s.cfg.quit_on_last_shell;
             s.changed(.quit_on_last_shell);
@@ -417,6 +429,8 @@ pub fn render(s: *SettingsWindow, theme: *const Theme) void {
             y = s.numRow(f, small, theme, y, row_h, label_x, ctl_x, Config.numIndex("scrollback").?, "Scrollback", "lines, new windows");
             y = s.checkRow(f, theme, y, row_h, label_x, ctl_x, "Colors in new windows", s.cfg.colors, .colors_default);
             y = s.checkRow(f, theme, y, row_h, label_x, ctl_x, "File names: mark on hover, double-click opens", s.cfg.file_opener, .file_opener);
+            y = s.checkRow(f, theme, y, row_h, label_x, ctl_x, "Folder names in blue (output without colors)", s.cfg.color_folders, .color_folders);
+            y = s.checkRow(f, theme, y, row_h, label_x, ctl_x, "Run ls again after a file action in gtty", s.cfg.refresh_ls, .refresh_ls);
             y = s.checkRow(f, theme, y, row_h, label_x, ctl_x, "Quit gtty when the last shell closes", s.cfg.quit_on_last_shell, .quit_on_last_shell);
             y += @round(row_h * 0.3);
             _ = g.text(f, label_x, y + @round((row_h - f.cell_h) / 2), "Start-up command", theme.title_fg);

@@ -5,7 +5,10 @@
 //! the mouse rests on the window's text, it looks for a file name there:
 //! the line around the text position → candidate paths (file_path.zig) →
 //! resolved against the window's folder → an existing regular file that
-//! isn't a program, or a folder. That name gets a dashed outline
+//! isn't a program, or a folder. Names with blanks or punctuation in them
+//! (`My File.txt`) come first: the longest span around the mouse that is
+//! a name in the window's folder (or in the folder its `dir/` part
+//! names), from that folder's listing (DirCache). That name gets a dashed outline
 //! (JobWindow draws `mark`), the pointer becomes a hand.
 //!   * Double-click inside the outline: open the file with its default app
 //!     (`show`; Shift+double-click: pick the app, `show -a`). A folder: type
@@ -34,6 +37,7 @@ const Screen = @import("../core/Screen.zig");
 const path = @import("file_path.zig");
 const remote = @import("../core/remote.zig");
 const JobWindow = @import("JobWindow.zig");
+const DirCache = @import("DirCache.zig");
 
 const FileOpener = @This();
 
@@ -105,11 +109,11 @@ pub fn help(fo: *const FileOpener, buf: []u8) []const u8 {
     if (fo.mark) |*m| {
         const name = std.fs.path.basename(m.file());
         return (if (m.folder)
-            std.fmt.bufPrint(buf, "double-click: cd to {s}  ·  hold and drag: drag it out", .{name})
+            std.fmt.bufPrint(buf, "double-click: cd to {s}  ·  hold and drag: drag it out  ·  right-click: more", .{name})
         else if (m.remote)
             std.fmt.bufPrint(buf, "double-click: copy {s} here (read-only) and open it  (Shift: choose the app)", .{name})
         else
-            std.fmt.bufPrint(buf, "double-click: open {s}  (Shift: choose the app)  ·  hold and drag: drag it out", .{name})) catch "";
+            std.fmt.bufPrint(buf, "double-click: open {s}  (Shift: choose the app)  ·  hold and drag: drag it out  ·  right-click: more", .{name})) catch "";
     }
     if (!fo.over) return "";
     const dest = fo.over_dest_buf[0..fo.over_dest_len];
@@ -200,24 +204,55 @@ fn find(fo: *FileOpener, w: *JobWindow, pos: Screen.TextPos, is_remote: bool) vo
     fo.pending = null;
     var fbuf: [4096]u8 = undefined;
     const dir = w.folder(&fbuf);
-    for (list.slice()) |*cand| {
-        var m: Mark = .{ .range = .{
-            .start = .{ .line = pos.line, .col = cand.start },
-            .end = .{ .line = pos.line, .col = cand.end },
-        } };
-        m.len = (resolve(&m.buf, dir, cand.text()) orelse continue).len;
-        switch (kindOf(m.buf[0..m.len :0])) {
-            .none => continue,
-            .file => if (drop_mode) continue,
-            // cd needs a shell waiting at its prompt (a drop doesn't).
-            .folder => if (drop_mode or w.atPrompt()) {
-                m.folder = true;
-            } else continue,
-        }
-        fo.mark = m;
-        return;
-    }
+    if (dir.len > 0) if (path.longestKnown(line, pos.col, Listed{ .dir = dir }, Listed.known)) |*cand| {
+        if (fo.tryName(w, pos, cand, dir)) return;
+    };
+    for (list.slice()) |*cand| if (fo.tryName(w, pos, cand, dir)) return;
 }
+
+/// Candidate `cand` resolved against `dir`: an existing file (a folder at
+/// a shell's prompt, or while dropping) → the mark. True: found.
+fn tryName(fo: *FileOpener, w: *JobWindow, pos: Screen.TextPos, cand: *const path.Candidate, dir: []const u8) bool {
+    var m: Mark = .{ .range = .{
+        .start = .{ .line = pos.line, .col = cand.start },
+        .end = .{ .line = pos.line, .col = cand.end },
+    } };
+    m.len = (resolve(&m.buf, dir, cand.text()) orelse return false).len;
+    switch (kindOf(m.buf[0..m.len :0])) {
+        .none => return false,
+        .file => if (drop_mode) return false,
+        // cd needs a shell waiting at its prompt (a drop doesn't).
+        .folder => if (drop_mode or w.atPrompt()) {
+            m.folder = true;
+        } else return false,
+    }
+    fo.mark = m;
+    return true;
+}
+
+/// For `file_path.longestKnown`: is this text a name with blanks /
+/// punctuation in a folder's listing? `My File.txt`: in the window's
+/// folder; `docs/My File.txt`, `~/x/a b`: in that folder. A plain name
+/// under a folder with blanks (`My Dir/notes.txt`) isn't in any listing
+/// (only the names a run misses are): checked on disk.
+const Listed = struct {
+    dir: []const u8,
+
+    fn known(l: Listed, text: []const u8) bool {
+        const slash = std.mem.lastIndexOfScalar(u8, text, '/') orelse
+            return DirCache.has(l.dir, text);
+        const name = text[slash + 1 ..];
+        if (name.len == 0) return false;
+        var buf: [4096]u8 = undefined;
+        if (!path.specialName(name)) {
+            const full = resolve(&buf, l.dir, text) orelse return false;
+            return kindOf(full) != .none;
+        }
+        const parent = if (slash == 0) "/" else text[0..slash];
+        const pdir = resolve(&buf, l.dir, parent) orelse return false;
+        return DirCache.has(pdir, name);
+    }
+};
 
 /// The outlined name at `pos`, if there is one there.
 pub fn markAt(fo: *FileOpener, pos: ?Screen.TextPos) ?*Mark {

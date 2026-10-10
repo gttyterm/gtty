@@ -77,10 +77,18 @@ fn configure(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTa
         mod.addCSourceFile(.{ .file = b.path("src/sys/gtty_menu.m"), .flags = &.{"-Wall"} });
         // Dragging a file name out of a job window (NSDraggingSession).
         mod.addCSourceFile(.{ .file = b.path("src/sys/gtty_drag.m"), .flags = &.{"-Wall"} });
+        // Move to Trash (NSFileManager).
+        mod.addCSourceFile(.{ .file = b.path("src/sys/gtty_trash.m"), .flags = &.{"-Wall"} });
+        // Open With ▸ Other…: choose an app (NSOpenPanel).
+        mod.addCSourceFile(.{ .file = b.path("src/sys/gtty_appchooser.m"), .flags = &.{"-Wall"} });
     } else {
         mod.addCSourceFile(.{ .file = b.path("src/sys/gtty_menu.c"), .flags = &.{ "-std=gnu11", "-Wall" } });
         // Dragging files out under Wayland (libwayland-client via dlopen).
         mod.addCSourceFile(.{ .file = b.path("src/sys/gtty_drag.c"), .flags = &.{ "-std=gnu11", "-Wall" } });
+        // Move to Trash (gio / trash-put / kioclient).
+        mod.addCSourceFile(.{ .file = b.path("src/sys/gtty_trash.c"), .flags = &.{ "-std=gnu11", "-Wall" } });
+        // Open With ▸ Other…: the desktop portal's app chooser (libgio via dlopen).
+        mod.addCSourceFile(.{ .file = b.path("src/sys/gtty_appchooser.c"), .flags = &.{ "-std=gnu11", "-Wall" } });
     }
 
     if (target.result.os.tag == .macos) {
@@ -89,9 +97,11 @@ fn configure(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTa
         mod.linkFramework("AudioToolbox", .{}); // the system alert sound
         mod.linkFramework("CoreServices", .{}); // LaunchServices (`show`)
         mod.linkFramework("CoreFoundation", .{});
+        mod.linkFramework("UniformTypeIdentifiers", .{}); // the app chooser
     } else {
         mod.linkSystemLibrary("util", .{}); // openpty on older glibc
         mod.linkSystemLibrary("dl", .{}); // dlopen on older glibc (Wayland drag)
+        mod.linkSystemLibrary("pthread", .{}); // the app chooser's thread on older glibc
     }
 
     if (sdl.bundled) {

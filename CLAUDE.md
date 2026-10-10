@@ -1,7 +1,10 @@
 # gtty — notes for Claude Code
 
-gtty is a graphical terminal written in Zig: every command gets its own
-on-screen job window (stdout and stderr together, as in a normal terminal).
+gtty ("True Graphic Virtual Terminal", the tagline) is a multi-window
+terminal written in Zig: shells and commands run in on-screen job windows
+(stdout and stderr together, as in a normal terminal), many on one screen.
+User-facing text (README, About, packages) doesn't say "job window" or
+"every command gets its own window".
 The user's own shell (zsh/bash) runs the commands; gtty is the terminal, not
 the shell. Users expect it to behave like a shell in a terminal.
 
@@ -120,22 +123,32 @@ the shell. Users expect it to behave like a shell in a terminal.
   `.zlogin` source the user's, then `__gtty_hooks`; bash: through
   bash-preexec if loaded, else a DEBUG trap chained after the user's), so
   a config can't drop them. Test such configs with `ZDOTDIR=…` / `HOME=…`
-  pointing at a scratch folder.
+  pointing at a scratch folder. The hooks must work under `set -u` /
+  `setopt nounset`: never read a variable that may be unset without a
+  default (`${COMP_LINE:-}`, `${PROMPT_COMMAND:-}`, `${arr[@]+"${arr[@]}"}`;
+  zsh: create `preexec_functions` / `precmd_functions` if missing); the
+  DEBUG trap runs before every command, so one bare `$VAR` errors all
+  the time (fixed 2026-10-07: "COMP_LINE: unbound variable").
 - **Chips** live in a **footer strip** at the bottom of every job window
   (drawn in the windows area only; a grid copy shows just the text, but
   the strip always takes its room so the PTY size doesn't change). The
+  **folder chip** first (`folder_chip_r`: folder icon + the folder's name,
+  `JobWindow.folderName`; hidden in a remote session), then the
   **git chip** (branch of the folder the window's process is
   in, `gtty_proc_cwd` in `src/sys/gtty_pty.c`: libproc on macOS,
   /proc/<pid>/cwd on Linux; refreshed once a second while shown and
-  running; hidden outside a repo and once the job finished), then the
-  **folder chip** (`folder_chip_r`: folder icon + the folder's name,
-  `JobWindow.folderName`; hidden in a remote session). The exit-code
+  running; always there while the job runs: outside a repo dimmed with
+  the label `git`, `no_git_label`, and no peek — an open one closes;
+  hidden once the job finished; decided 2026-10-08). The exit-code
   badge of a failed window sits in the strip's right end.
   - **Folder chip peek** (`Peek.kind` folder, `Peek.openFolder`,
-    `App.openFolderPeek`): hover = the compact peek (copy, full path);
-    a click opens it expanded at once: the folders above (`/` on top, the
-    parent at the bottom by the chip, selected), filter + keys as the
-    branch list. A pick returns `Action.cd` → `JobWindow.cdTo` when the
+    `App.openFolderPeek`): hover or a click = the peek (copy, full path;
+    a click on the path copies it too, `Peek.click`); the mouse onto its
+    expand button (or a click on it) expands it (`Peek.motion`): the
+    folders above (`/` on top) and
+    the current folder last (green dot, by the chip; picking it = "already
+    here"), the parent above it selected; filter + keys as the branch
+    list (2026-10-08). A pick returns `Action.cd` → `JobWindow.cdTo` when the
     shell is at its prompt (green "cd sent", closes after 1 s; that feeds
     the History ▸ list), else red "the shell is busy" + beep. Closes when
     the folder changes some other way.
@@ -149,8 +162,72 @@ the shell. Users expect it to behave like a shell in a terminal.
     Enter/Esc, wheel; picking runs `git switch` in the background
     (`git.Run`, on a PTY): green border, closes after 1 s; failure: red
     border + git's last lines inside the peek + status notice + beep.
-  - Testing: `/move` onto the chip (about x 45, y 620 at the default size),
-    `/wait 900`; the expand icon is ~25 px right of the copy icon.
+  - Testing: `/move` onto the chip (the folder chip about x 45, y 620 at
+    the default size; the git chip right after it), `/wait 900`; the
+    expand icon is ~25 px right of the copy icon. The real mouse over
+    gtty's window sends its own events and spoils such runs.
+- **File actions** (added 2026-10-07; App "file actions" section) on an
+  outlined local name (file or folder), or on the names ⌘-clicked
+  (Ctrl-click on Linux; `App.file_sel`: window + text range + path,
+  drawn as boxes by `drawFileSel`; a plain click in a window's text
+  clears it). Right-click on a name = the file menu (`Menu.Purpose.files`,
+  `openFileMenu` / `fileMenuPick`, files in `App.menu_files`): Open /
+  Open with <app> / Open With… (files; see below), cd <name> (16 characters, …; `cd_label_max`) / Open in Finder (folders); no title row (it opens at the name), Rename… (F2),
+  Copy (⌘C), Copy Name(s) (`copyNames`: the base names as text, one per
+  line), Cut (⌘X), Paste (⌘V; no other text: files into the folder
+  clicked, else the window's folder; text typed into the job), Move to Trash (⌘⌫, Linux Ctrl+Delete; only when
+  `gtty_trash_supported`), Delete… (⌫ / Delete). **Shortcuts act only
+  while the mouse "has" the name** (`pointerFresh`: it moved or clicked
+  after the last key, `last_point_ms` / `last_key_ms`), so typing with
+  the pointer resting on a name stays the shell's; a text selection wins
+  for ⌘C (`fileCopyKey` / `filePasteKey` in `copySelection` /
+  `pasteKey`; the rest in `fileKey`, before the job's keys). Copy / cut
+  put the files on gtty's own file clipboard (`file_clip`,
+  `file_clip_move`; not the system's): status line "copy X:
+  select a destination, ⌘V pastes" (`clipHelp`); the names copied flash
+  white for 350 ms (`App.flashTargets` → `JobWindow.flashNames`,
+  `name_flash`; no bubble). **The last copy decides what Paste does**
+  (2026-10-08): any new clipboard text (gtty's copy or another app's,
+  `SDL_EVENT_CLIPBOARD_UPDATE` → `clipboardChanged`) empties
+  `file_clip`; while files wait there, every Paste (⌘V: the mouse's
+  folder name / window, else `currentJob`'s folder, `pasteFilesInto`;
+  the right-click menu's plain "Paste" row, `pasteFolder`) pastes the
+  files, else the text. Paste asks (Modal:
+  "Copy / Move into X?", Enter = OK, Esc / no answer = nothing), then
+  `startFileOp` (copy / move / remove in `gtty_copy.c`: a free name, a
+  folder never into itself; move = rename(2), across disks cp + rm; a
+  cut is used once). Delete asks (danger button, the names listed),
+  `rm -rf` in the background. Trash: no question, so the names flash
+  (`flashTargets`; a failure: red bubble) (`src/sys/gtty_trash.m`
+  NSFileManager; `gtty_trash.c` gio / trash-put / kioclient6/5 with a
+  desktop session). Rename: the Modal's input field over the name
+  (`Spec.input`, `anchor`, `select_stem`: up to the last dot; LineEdit
+  keys), Enter = rename(2) in place (empty, `/`, `.`, `..`, a taken name:
+  red line, stays open), Esc / timeout = nothing. Every result of an
+  asked action: FileFx bubble on the window (no flash); cancelled /
+  refused: only the status line; `filesChanged` (outlines looked for again).
+  Remote names: none of this (normal menu). Tests: `test/fileactions.gt`, `test/fileactions-2.gt`.
+  **Opening: one row** (added 2026-10-08, `loadPicker` → `picker_apps`
+  + `picker_icons` when the menu opens; icons: `gtty_app_icon`, macOS
+  NSWorkspace, Linux none yet; `Row.icon`, `Gfx.imageRgba` / `image`):
+  a default app (`pickerDefault`) → "Open with <app>" + its icon
+  (click = `show`, code `file_open`) and a ▸ box (hover or click opens,
+  `hoverSubMenu`: file menus open their ▸ on hover; another row closes
+  it): the other apps, separator (`Menu.separator`), **Other…**
+  (`Menu.open_with_other`). No default → "Open With…" (no ▸; code
+  `file_open_with`): a click = the system chooser. `Row.hover_sub` (a
+  whole row that only opens a submenu) stays in Menu, unused for now.
+  Other… / Open With… =
+  `App.chooseApp` → `gtty_choose_app` (`src/sys/gtty_appchooser.{m,c}`;
+  macOS: NSOpenPanel sheet in /Applications, Enable Recommended / All
+  Applications (All when nothing is recommended), Always Open With
+  (sets the default for the file's type); gtty opens the file. Linux:
+  portal `OpenURI.OpenFile` with `ask`, libgio via dlopen on a thread;
+  the portal opens the file; untested on a real desktop); the answer
+  is polled in `tickChooser` (notice). `show -a` / ⇧ double-click: the
+  same rows over the prompt (`addPickerRows`, `openWithPick`), no apps
+  → the chooser. `GTTY_SHOW_DRY=1`: "would ask which app opens X".
+  Test: `test/openwith.gt`.
 - **Folder button** (the title bar's folder icon, `JobWindow.files_r`,
   windows area only; `App.openFolder`): the folder the window's program
   is in at the click (`JobWindow.folder`) in the system's file manager
@@ -263,9 +340,7 @@ the shell. Users expect it to behave like a shell in a terminal.
   the program turned on bracketed paste, `Screen.bracketed_paste` from
   `ESC[?2004h/l`), else the prompt (line ends dropped), or an expanded
   peek's filter. Plain Ctrl+V goes to the job. One press = one paste:
-  every route (key, right-click menu, menu bar) ends in `pasteInto`; on
-  macOS the Edit menu's key equivalent fires too, so `menuOwnsKey` drops
-  the key down while that row is enabled; auto-repeats of a copy / paste
+  every route (key, right-click menu) ends in `pasteInto`; auto-repeats of a copy / paste
   key are dropped (`clipboardKey`). The shell hooks turn off the paste
   highlight (zsh `zle_highlight=(paste:none)`, bash
   `enable-active-region off`; the user's config wins).
@@ -323,6 +398,48 @@ the shell. Users expect it to behave like a shell in a terminal.
   off (title-bar button or `colors [on|off]`): plain text, no escape codes
   shown; it is draw-time only, so turning them on restores everything.
   Blink (SGR 5/6) is ignored: steady text.
+- **Folder and link names** (added 2026-10-07; config `color-folders`,
+  default on, Settings → General; env `GTTY_COLOR_FOLDERS=0` wins at
+  start; `JobWindow.color_folders`): when a command's output ends (the
+  hooks' D mark, `Screen.done_seq`; a job without marks: at its exit)
+  and it set no colors (`Screen.colored` / `done_colored`: any SGR fg /
+  bg since C), `JobWindow.colorNames` → `Screen.markNames` (rows of
+  `out_rows`, wrapped rows joined, words or runs of ≤ 4 words joined by
+  single spaces, longest first, a trailing `:` `,` `@` tried off; ≤ 3000
+  rows / 4000 lookups) asks `NameCtx.kind` (lstat, relative to the
+  window's folder; `/` alone skipped; nothing in a remote session):
+  folders get `Color.folder()` (theme focus blue), symbolic links
+  `link_file` (text color) / `link_folder` (blue), each mixed with 35 %
+  pink (`Theme.link`) — draw-time tags, off with the window's colors;
+  turning the setting off clears them (`clearNames`). Links go into
+  `JobWindow.links` (text range + real target, newest 256). **Link
+  hover** (`App.link_hover`, `updateLinkHover`, `drawLinkHover`): after
+  `tip_delay_ms` a box over the name (below when no room; kept on
+  screen; a small arrow at the name): "→ <target>" (cut from the left;
+  broken: "(missing)", red) + "click: cd to <folder>"; the box stays
+  while the mouse is on it (10 px margin), and `link_grace_ms` (1.5 s,
+  `leave_ms`, `tickLinkHover`) after it left the name, so the mouse can
+  reach it (other names on the way don't take over); a click → `cdTo(target)` for a folder link, `cdTo(dirname(target))` for a file (or broken) link, when the
+  shell is at its prompt, else beep + "the shell is busy". Test:
+  `test/names.gt`.
+- **Refresh after a file action** (added 2026-10-07; config
+  `refresh-ls`, default on, Settings → General "Run ls again after a
+  file action in gtty"; `JobWindow.refresh_ls`): a paste / move / delete
+  / drop copy that ended (`tickCopies`, also when only some failed), a
+  rename, a trash, a file dragged out and moved → `App.refreshAfter`
+  (the window it was done in) → `JobWindow.refreshListing`: types
+  `\x15<cmd>\r`, cmd = the last listing command run there
+  (`ls_cmd_buf`: `Screen.lastCommand`, read back from the input cells
+  between the B and C marks, `cmd_seq`; `isListing`: first word ls / ll
+  / la / l / lsd / exa / eza / tree / dir / vdir / gls, no `;|&<>`$()`)
+  else `ls`; only at the prompt with nothing typed (`Screen.inputPending`),
+  not a read-only window, not remote. A cd gtty types (`JobWindow.cdTo`:
+  link box, folder chip, History ▸, double-click / "cd <name>" on a
+  folder) sets `list_after_cd`: when its D mark comes with status 0
+  (`Screen.done_status`), the new folder is listed (`listFolder(true)`:
+  the last listing command only if it has no names, `optionsOnly`, else
+  `ls`). The AI's cd uses `cdOnly` (its next step waits for the prompt).
+  Test: `test/refresh-ls.gt`.
 - **Wide characters and emoji:** `src/core/wcwidth.zig` (generated from
   Unicode 16: 0 = combining / format / VS / ZWJ, 2 = East Asian wide +
   emoji shown as emoji). `Screen`: a wide character sets `Attrs.wide`, the
@@ -349,8 +466,10 @@ the shell. Users expect it to behave like a shell in a terminal.
   it would open (`test/show.gt`). Linux side compiles but is untested
   (picker: mimeinfo.cache, `gio launch` / `gtk-launch`).
 - **Menu bar** (mouse; shortcuts could clash with the jobs' keys): menus
-  **gtty** (About gtty, Settings…, New Window, New Shell, Run command, Sync Typing) and **Edit** (Copy,
-  Paste, Select All). **About gtty** (`GTTY_MENU_ABOUT`; macOS: SDL's
+  **gtty** (About gtty, Settings…, New Window, New Shell, Run command, Sync Typing). **No Edit
+  menu** (removed 2026-10-07: with several job windows its Copy / Paste
+  were confusing): ⌘C / ⌘V / ⌘A (Linux Ctrl+Shift+C / V / A) are plain
+  keys (`copySelection`, `pasteKey`, `selectAll`). **About gtty** (`GTTY_MENU_ABOUT`; macOS: SDL's
   About row, re-targeted in `gtty_menu.m`; Linux: the drawn bar's first
   row; `/menu about`): gtty's own box (`App.drawAbout`, `about_visible`;
   any click or key closes it): name + version, tagline,
@@ -362,7 +481,10 @@ the shell. Users expect it to behave like a shell in a terminal.
   in the folder of the current window (`currentJob`: focused, else the
   current one; the right-click menu: the window clicked), else home.
   **New Window** (`App.newWindow`, `GTTY_MENU_NEW_WINDOW`, ⌘N /
-  Ctrl+Shift+N, as GNOME Terminal's New Window / New Tab): another gtty process (`gtty_open_new_instance` in
+  Ctrl+Shift+N, as GNOME Terminal's New Window / New Tab; also the
+  Dock icon's right-click menu: macOS `applicationDockMenu:` added to
+  SDL's app delegate in `gtty_menu.m`, Linux the `new-window` action of
+  `gtty.desktop`, a plain `gtty` in home): another gtty process (`gtty_open_new_instance` in
   `gtty_open.c`: own executable, double fork, no args → opens a shell) in
   the current window's folder, else home; its window cascades from this
   one (`App.cascade`: same size, +28 pt right / down, back to the usable
@@ -375,7 +497,7 @@ the shell. Users expect it to behave like a shell in a terminal.
   calls `gtty_app_activate` + `SDL_RaiseWindow` until active (≤ 3 s). `GTTY_SHOW_DRY=1`
   only says so (folder + geometry). macOS = the system menu bar
   (`src/sys/gtty_menu.m`: SDL's Preferences… row becomes Settings… ⌘,;
-  Edit ⌘C/⌘V/⌘A inserted; enabled states asked through
+  enabled states asked through
   `menuEnabled` → `App.menuRowEnabled`, check marks through
   `menuChecked` (`gtty_menu_install`'s third argument, applied in
   `validateMenuItem`); picks arrive as an SDL user
@@ -405,6 +527,14 @@ the shell. Users expect it to behave like a shell in a terminal.
   on every mouse move over its text (`sendHover`), `opener.leave` when the
   mouse leaves. `JobWindow.textChanged` (App, each frame) drops the outline
   when the text version changed, then App hovers again. Hover → candidates
+  (names with blanks / punctuation first: `file_path.longestKnown`,
+  the longest word-edge span around the mouse that is in a folder's
+  listing, `src/ui/DirCache.zig`: last 8 folders, only the names a
+  plain run misses, read again when the folder's mtime changes; added
+  2026-10-07, `test/filenames.gt`; the mouse on a blank inside a name
+  works too when the line goes on right of it, 2026-10-08,
+  `test/filenames-blank.gt`; up to 40 word edges each side, a wide
+  character's spacer cell is skipped: `Plug？ [27013].mp4`)
   → resolved against the window's folder → existing regular
   non-executable file → `mark` (text range), drawn dashed by the window
   (`drawFileMark`, windows area only; none while selecting text,
@@ -415,7 +545,9 @@ the shell. Users expect it to behave like a shell in a terminal.
     fetch): `show` (Shift: `show -a`) or `fetchRemote`; a folder → `cdTo`.
   - **Press on the mark** (clicks 1): `App.file_press` (no selection yet,
     window focused). Released without moving → a plain click
-    (`mouseDown` + `mouseUp` at the press). Held `FileOpener.hold_ms`
+    (`mouseDown` + `mouseUp` at the press) that also copies the name
+    (`copyNames`: text on the clipboard + paste history, the name
+    flashes, "copied X"; 2026-10-08, `test/copyname.gt`). Held `FileOpener.hold_ms`
     (300) → `opener.held` (`tickFilePress`; outline drawn solid). Moved
     ≥ 4 px: held → `App.dragFile` (`gtty_drag_file`,
     `src/sys/gtty_drag.m`: NSDraggingSession from the SDL window's
@@ -432,10 +564,24 @@ the shell. Users expect it to behave like a shell in a terminal.
     files from another app; `FileOpener.drop_mode` outlines folder names
     only (anywhere); the status bar says where it goes (`helpLine`,
     `dropTarget`: outlined folder, else the window's `folder`; ssh
-    window: not yet). On the drop `startCopy` → `gtty_copy_start`
+    window: not yet). On the drop `askCopy` opens a **modal**
+    ("Copy into X?", Cancel / Copy, 10 s; `ModalJob.copy_drop` owns the
+    paths); Copy → `startCopy` → `gtty_copy_start`
     (`src/sys/gtty_copy.c`: child runs `cp -Rp` per item, a taken name
     gets " 2", " 3"… before the extension, a folder never into itself),
-    polled in `tickCopies` (notice).
+    polled in `tickCopies` (notice). Cancel / Esc / no answer: nothing
+    copied ("copy cancelled").
+  - **Feedback on the window** (`src/ui/FileFx.zig`, `JobWindow.file_fx`,
+    added 2026-10-07: the copy took a few ms, unseen): the shared
+    `JobWindow.bubble`, no flash: "↓ copying X into Y…" (blue, ≥ 400
+    ms), then the result for 1.6 s (green done, red failed); grid
+    windows too (over the cell). Nothing when nothing was done
+    (cancelled, ssh, shell busy, already there) or when something else
+    shows it (the `cp` typed for a drop between job windows). App:
+    `fxOn` / `finishFx` (`FxRef`: window + id). A file dragged out
+    that is gone from its folder within 2 s of the drag's end
+    (`drag_out`, `tickDragOut`: the target moved it) → "✓ moved X out
+    of Y".
   - **Between job windows:** gtty's own drag dropped on gtty
     (`drop_inside`, set when `gtty_drag_active` at the drop's start): the
     file is `App.drag_path` (SDL's data ignored: on Wayland SDL can't read
@@ -598,8 +744,8 @@ decisions; items marked *open* are undecided.
   is typed into the prompt; hooks run directly: `/wait ms`, `/shot x.bmp`
   (screenshot; convert with `sips -s format png`), `/type text` (text + Enter
   through the real keyboard path), `/click x y` (real mouse event, window coords), `/dclick x y` (double click), `/down x y` / `/up x y` (left button), `/rclick x y` (right click), `/move x y` (mouse move, no button: hover / tooltips), `/drag x1 y1 x2 y2` (press, move, release), `/text text` (typed, no Enter),
-  `/key ctrl+shift+left` (a key with modifiers: ctrl shift alt cmd + left right up down home end backspace delete enter escape tab c v insert a n t period pageup pagedown), `/resize w h`
-  (gtty's OS window), `/menu run|settings|copy|paste|select-all|new-shell|new-window|sync-typing|about` (a menu pick; macOS
+  `/key ctrl+shift+left` (a key with modifiers: ctrl shift alt cmd + left right up down home end backspace delete enter escape tab c v x insert a n t period pageup pagedown f2), `/resize w h`
+  (gtty's OS window), `/menu run|settings|new-shell|new-window|sync-typing|about` (a menu pick; macOS
   menus can't be clicked from a script), `/target main|settings` (where
   the next /click /move /drag /text /key /type /shot go), `/mods
   cmd+shift|none` (modifier keys held, via SDL_SetModState), `/quit`. macOS blocks synthetic keystrokes (osascript), so use
@@ -626,9 +772,9 @@ decisions; items marked *open* are undecided.
   q 80; `GTTY_DEMO_QUALITY`). Sizes: hero 1200×520, the rest 1200×760.
   Needs a display (the window shows while it records; keep the mouse off
   it) and overwrites the clipboard. After UI changes, check the
-  coordinates in the scripts (title-bar copy ~25,24; chips y ~646 and the
-  branch peek's expand ~52,638 at 1200×760; the folder chip moves right
-  when the branch name is longer). The README shows no AI (not ready).
+  coordinates in the scripts (title-bar copy ~25,24; chips y ~646: the
+  folder chip ~45, its peek's expand ~52,638 at 1200×760; the git chip
+  moves right when the folder name is longer). The README shows no AI (not ready).
 - Color test lines: use `\033`, not `\e` — macOS `/bin/bash` is 3.2 and its
   `echo -e` doesn't know `\e`. E.g. `/s bash` then
   `/type echo -e "\033[31mred \033[1;31mbold\033[0m"`; `/click` on the color
@@ -656,10 +802,20 @@ decisions; items marked *open* are undecided.
   bar: the file opener's help line on the left, short notices on the right.
 - `src/ui/Peek.zig` — a chip's peek / expanded peek (git branches: filter,
   switch); App owns it and routes mouse / keys to it.
+- `src/ui/Modal.zig` — the modal dialog (reusable; added 2026-10-07):
+  title, body lines, ≤ 3 buttons (`Kind` normal / primary / danger),
+  `default` (Enter, focused), `safe` (Esc and the **timeout**, always
+  there: default 10 s, countdown text + shrinking bar; with no answer
+  the less critical choice is taken). App: `modal`, `modal_job`
+  (`ModalJob`, what the answer is for), `openModal` (one open gets its
+  safe answer first), `resolveModal`, `tickModal`; it takes every key /
+  click / wheel while open, drawn over a dimmed screen, centered on its
+  window. Test: `test/filefx.gt`.
 - `src/ui/Menu.zig` — pop-up menus: generic rows (label, key / note,
   enabled) + optional dim title; `purpose` = `edit` (right-click Copy /
-  Paste), `open_with` (`show`'s app picker) or `bar` (a menu of the drawn
-  menu bar: gtty / Edit, each row a `gtty_menu.h` code). App opens
+  Paste), `files` (the file actions), `open_with` (`show`'s app picker)
+  or `bar` (a menu of the drawn menu bar: gtty, each row a
+  `gtty_menu.h` code). App opens
   it and acts on the row picked.
 - `src/sys/gtty_drag.{m,c}` — drag files out (macOS / Wayland);
   `src/sys/gtty_copy.c` — copying dropped files in the background.
@@ -695,6 +851,28 @@ decisions; items marked *open* are undecided.
   A memory window (last `max_lines` rows, `--scrollback`); rows that wrapped
   at the edge are flagged so a width change reflows the text. Selection
   lives here too (line positions, adjusted on trim/reflow).
+  Queries are answered (`Screen.query` → `reply_buf`, written to the PTY
+  in `JobWindow.pump`, not through `send`: never mirrored or refused):
+  `ESC[6n` / `ESC[?6n` cursor position, `ESC[5n`, `ESC[c` (VT220 +
+  color). Without them gh's / Go survey prompts hang (fixed 2026-10-08,
+  `test/queries.gt`).
+  Full-screen programs (added 2026-10-09, `test/vim.gt`): scroll region
+  (`ESC[t;br`, `region_top` / `region_bot`; `scrollRows`, `lineFeed`,
+  `reverseIndex`), insert / delete lines (`ESC[L` / `ESC[M`), `ESC[S` /
+  `ESC[T`; the alternate screen (`?47` / `?1047` / `?1049`, `Screen.alt`:
+  a page of `rows` rows from `base`, nothing scrolls into the scrollback,
+  no marks, removed on leaving; a width change drops it and makes it
+  again blank, the program redraws); `?1` application cursor keys
+  (`app_cursor` → `jobKeyBytes`: `ESC O A`…); PageUp / PageDown go to
+  the program while on the alternate screen.
+  Cursor (2026-10-09): `?25` hides / shows it (`Screen.cursor_hidden`);
+  output the user didn't just type for (> `echo_wait_ms` after the last
+  key, `JobWindow.key_ms`) hides it until the output rests
+  `cursor_rest_ms` (`busy_ms`), so redrawn progress (docker build) doesn't
+  drag it around. `JobWindow.pump` reads on while output keeps coming
+  ≤ `settle_ms` (2) apart (`Process.waitOutput`, `gtty_wait_readable`),
+  so a frame written line by line isn't drawn half done (the text
+  jumped; docker writes its progress one line per write).
 - `src/core/Tee.zig` — every job's full raw output in
   `$TMPDIR/gtty-<pid>/job-<serial>.log`; deleted with the window / on exit,
   stale folders swept at start. Copy-all rebuilds from it after rows drop.
@@ -707,19 +885,43 @@ decisions; items marked *open* are undecided.
 
 ## Conventions
 
+- **Flashes** (user's rule, 2026-10-07): a white flash is only a hint
+  that an action was taken when nothing else on screen shows it. Never
+  flash the whole window, except the title-bar copy / "Copy all output"
+  taking the entire content (`flashCopied` flashes exactly the rows
+  copied); otherwise flash only the object acted on (`flashNames`). No
+  flash when nothing was done (cancelled, refused) and none for actions
+  done through a dialog / window (the dialog is the indication).
+
 - Repo: git.foodineat.com, org GTTY, repo gtty (Forgejo); public:
   GitHub `git@github.com:gttyterm/gitty.git` (repo name **gitty**). Local:
   ~/src/gtty/gtty.
-- **GitHub Actions** (`.github/workflows/`): `ci.yml` (push to main,
-  pull requests: build + unit tests on ubuntu-24.04 with `-Dbundled-sdl`
-  and macos-15 with Homebrew SDL3; `contents: read`); `release.yml` (tag
-  `v<version>`, must match build.zig.zon: macos-15, environment
-  `release` with the signing secrets, runs `scripts/sign-macos.sh`
+- **GitHub Actions** (`.github/workflows/`): `ci.yml` (pull requests
+  and by hand only, nothing on a push to main: build + unit tests on
+  ubuntu-24.04 with `-Dbundled-sdl` and macos-15 with Homebrew SDL3;
+  `contents: read`); `release.yml` (a pushed tag `v*.*.*`, must match
+  build.zig.zon; job `channel` (ubuntu, fetch-depth 0) checks the tag
+  form, picks the channel (see "Releases") and guards a stable x.y.0;
+  then macos-15, environment `edge` or `release` with the signing
+  secrets, runs `scripts/sign-macos.sh`
   (CI path: temporary keychain, API-key notarization) → build-bin.sh +
   package.sh, checks the dmg (codesign, stapler, spctl), SHA256SUMS,
-  `gh release create` with the dmg, .deb, .rpm, .tar.gz; workflow-level
+  `gh release create --generate-notes` with the dmg, .deb, .rpm, .tar.gz
+  (a release already made by hand for the tag: `gh release edit` the
+  flags + `upload --clobber`); workflow-level
   `permissions: {}`, the job asks for `contents: write` explicitly; run by
-  hand = the same build as an artifact, no release). The Finder layout
+  hand = the same build as an artifact, no release).
+- **Releases** (two channels, from the tag's MINOR; tags
+  `vMAJOR.MINOR.PATCH`, only `main` lives long): **odd minor = edge**
+  (features being tested; GitHub pre-release, not latest; environment
+  `edge`), **even minor = stable** (normal release, latest; environment
+  `release`). PATCH = fixes within that minor. Edge tags go on main
+  commits. **Promote** a tested edge build by tagging its commit with the
+  next even minor, no merge (CI refuses a stable x.y.0 on a commit
+  without an edge tag): `git tag -a v1.10.0 v1.9.2 -m v1.10.0 && git push
+  origin v1.10.0`. Fixes for a stable line once main has moved on: a
+  `release/X.Y` branch from that stable tag, tagged x.y.1, x.y.2, … (no
+  edge-tag check for PATCH > 0). The Finder layout
   of the dmg needs Automation access on the runner; if it fails the dmg
   is unarranged (warning only).
 - Keep platform-specific C in `src/sys/`; keep `@cImport` only in `src/c.zig`.
@@ -771,7 +973,8 @@ checking its license first; record third-party components in
 - More chips; folder chip: siblings, a remote folder; peek shrink
   animation, selecting text inside a peek;
   modals, the ⋯ menu.
-- Full-screen programs (vim, htop, less): alternate screen grid.
+- Full-screen programs: the wheel on the alternate screen still scrolls
+  gtty's view (xterm sends arrow keys); mouse reporting (`?1000`…).
 - Blinking text (SGR 5/6 is ignored today; nice-to-have, low priority;
   color-off should stop it too). Blinking cursor.
 - Bold/italic faces; scrolling back past the memory window

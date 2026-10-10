@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Full-screen programs:  zig build run -- --script test/vim.gt
+# vim scrolls with a scroll region (above its status line), insert /
+# delete line and the alternate screen. vim-1: lines 21… under the top
+# (moved past the bottom with j); vim-2: a page further (PageDown);
+# vim-3: back at the shell, vim's page gone, the seq command above.
+/s bash
+/wait 1500
+/type seq 1 200 > /tmp/gtty-vim-test.txt; vim -u NONE /tmp/gtty-vim-test.txt
+/wait 1000
+/text 40j
+/wait 300
+/key down
+/key down
+/wait 500
+/shot vim-1.bmp
+/key pagedown
+/wait 500
+/shot vim-2.bmp
+/text :q
+/key enter
+/wait 800
+/shot vim-3.bmp
+/quit

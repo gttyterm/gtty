@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copy a name: a single click on an outlined name copies it (text), ⌘V
+# types it at the shell's prompt; ⌘C on a name puts the file on gtty's
+# file clipboard, the right-click menu's plain "Paste" then asks to copy
+# it; a click on a name again makes text the last copy. Run in a scratch
+# folder:
+#   mkdir -p w/sub && cd w && touch 'My File.txt' keep.txt notes.txt
+#   gtty --script $REPO/test/copyname.gt
+# Shots go to the folder above.
+/s bash
+/wait 1500
+/type clear
+/wait 500
+/type LC_ALL=C ls -1
+/wait 800
+# single click on "My File.txt": copied; ⌘V types it
+/move 50 66
+/wait 300
+/click 50 66
+/wait 500
+/shot ../c1-clicked.bmp
+/move 400 300
+/wait 200
+/key cmd+v
+/wait 400
+/shot ../c2-pasted-name.bmp
+/key ctrl+c
+/wait 300
+# ⌘C on keep.txt: the file; right-click menu: Paste (asks)
+/move 50 84
+/wait 300
+/key cmd+c
+/wait 300
+/rclick 400 300
+/wait 400
+/shot ../c3-menu.bmp
+/click 430 377
+/wait 400
+/shot ../c3b-ask.bmp
+/key escape
+/wait 300
+# folder: file menu on sub
+/move 30 120
+/wait 300
+/rclick 30 120
+/wait 400
+/shot ../c3c-folder.bmp
+/key escape
+/wait 300
+# file menu on notes.txt: Copy Name / Paste rows
+/rclick 50 102
+/wait 400
+/shot ../c4-filemenu.bmp
+/key escape
+/wait 300
+# click keep.txt: text again, ⌘V types the name (no question)
+/move 50 84
+/wait 300
+/click 50 84
+/wait 400
+/move 400 300
+/wait 200
+/key cmd+v
+/wait 400
+/shot ../c5-text-again.bmp
+/quit

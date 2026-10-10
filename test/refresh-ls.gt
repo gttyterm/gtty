@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Refresh after a file action (setting refresh-ls, default on): copy
+# notes.txt, paste it into the window's folder (asks, Enter); the shell
+# runs its last listing command (ls -1) again. Run in a scratch folder:
+#   mkdir -p w/sub && cd w && touch keep.txt notes.txt
+#   gtty --script $REPO/test/refresh-ls.gt
+# Expect: r1 a second "ls -1" listing with "notes 2.txt".
+/s bash
+/wait 1500
+/type clear
+/wait 500
+/type ls -1
+/wait 800
+/move 50 102
+/wait 300
+/key cmd+c
+/move 300 300
+/wait 300
+/key cmd+v
+/wait 300
+/key enter
+/wait 1500
+/shot ../r1.bmp
+/quit

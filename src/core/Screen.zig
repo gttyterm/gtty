@@ -180,10 +180,47 @@ lf_end: u64 = 0,
 out_rows: ?struct { start: usize, end: ?usize } = null,
 typed_row: ?usize = null,
 lf_row: usize = 0,
+/// The output set a color (SGR fg / bg, not a reset): since the last
+/// C mark (shells with marks), else since the start. `done_colored`:
+/// that, for the command that just ended (copied at its D, before the
+/// prompt's own colors), and `done_seq` counts those ends.
+colored: bool = false,
+done_colored: bool = false,
+done_seq: u32 = 0,
+/// Where the input line starts (the cursor at the B mark), and the
+/// command line read back from it at the C mark (`last_cmd`, the cells
+/// typed there; `cmd_seq` counts them).
+cmd_start: ?Pos = null,
+last_cmd_buf: [1024]u8 = undefined,
+last_cmd_len: usize = 0,
+cmd_seq: u32 = 0,
+/// The exit status the D mark gave for the command that just ended
+/// (null: none given).
+done_status: ?u8 = null,
 /// The program asked for bracketed paste (DEC private mode 2004, as zsh,
 /// bash and vim do): a paste is sent wrapped in ESC[200~ … ESC[201~ so it
 /// is taken as text, not typed keys (no line runs on its newline).
 bracketed_paste: bool = false,
+/// Answers to the program's queries (cursor position, device status,
+/// device attributes), for the owner to write back to its PTY
+/// (`takeReplies`). Prompts (gh's, any Go `survey` one, …) ask where the
+/// cursor is and wait for the answer: without it they hang, echoing
+/// nothing.
+reply_buf: [256]u8 = undefined,
+reply_len: usize = 0,
+/// The scroll region (`ESC[t;br`, rows of the live screen, 0-based,
+/// inclusive): a line feed on its last row (or a reverse index on its
+/// first) scrolls only these rows, as vim does above its status line.
+region_top: u16 = 0,
+region_bot: u16 = std.math.maxInt(u16),
+/// The alternate screen (`ESC[?1049h`, vim, less, htop, …): a page of
+/// `rows` rows from `base`; leaving it removes the page and puts the
+/// cursor back. Inside it nothing scrolls into the scrollback.
+alt: ?struct { base: usize, row: usize, col: u16 } = null,
+/// Cursor keys in application mode (`ESC[?1h`): arrows go as `ESC O A`.
+app_cursor: bool = false,
+/// The program hid the cursor (`ESC[?25l`, DECTCEM; `ESC[?25h` shows it).
+cursor_hidden: bool = false,
 
 state: State = .ground,
 /// OSC being read: its first bytes, its length, where its ESC was.
@@ -213,11 +250,20 @@ pub fn deinit(s: *Screen) void {
 /// New grid size. A new width reflows the text to fill it.
 pub fn resize(s: *Screen, cols: u16, rows: u16) void {
     const new_cols = @max(cols, 1);
+    // The full-screen program redraws its page at the new size: the page
+    // is dropped before a reflow and made again, blank, after it.
+    const alt_on = s.alt != null;
+    if (alt_on and new_cols != s.cols) s.leaveAlt();
     s.rows = @max(rows, 1);
     if (new_cols != s.cols) {
         s.reflow(new_cols) catch {};
         s.cols = new_cols;
     }
+    if (alt_on) {
+        if (s.alt == null) s.enterAlt() else s.fitAltPage();
+    }
+    s.region_top = 0;
+    s.region_bot = s.rows - 1;
     if (s.cur_col >= s.cols) s.cur_col = s.cols - 1;
     s.scrollBy(0); // keep the scroll in range
     s.generation +%= 1;
@@ -238,6 +284,12 @@ pub fn clear(s: *Screen) void {
     s.out_rows = null;
     s.typed_row = null;
     s.lf_row = 0;
+    if (s.alt) |*a| {
+        a.base = 0;
+        a.row = 0;
+        a.col = 0;
+        s.fitAltPage();
+    }
     s.generation +%= 1;
 }
 
@@ -254,8 +306,16 @@ pub fn lineCount(s: *const Screen) usize {
     return @max(n, s.cur_row + 1);
 }
 
+/// One past the last row of the live screen: the view's bottom when not
+/// scrolled back. Unlike `lineCount` it keeps the empty rows under the
+/// cursor, so a program that moves the cursor up to redraw (docker's
+/// progress, …) doesn't shift the view while it is mid-redraw.
+pub fn viewEnd(s: *const Screen) usize {
+    return @max(s.lines.items.len, s.cur_row + 1);
+}
+
 pub fn scrollBy(s: *Screen, delta: isize) void {
-    const total = s.lineCount();
+    const total = s.viewEnd();
     const max_scroll: usize = if (total > s.rows) total - s.rows else 0;
     const cur: isize = @intCast(s.scroll);
     const next = std.math.clamp(cur + delta, 0, @as(isize, @intCast(max_scroll)));
@@ -270,7 +330,7 @@ pub fn scrollTo(s: *Screen, lines_up: usize) void {
 
 /// Rows the view can scroll up.
 pub fn maxScroll(s: *const Screen) usize {
-    return s.lineCount() -| s.rows;
+    return s.viewEnd() -| s.rows;
 }
 
 // ---------------------------------------------------------------- feeding
@@ -382,17 +442,20 @@ fn escape(s: *Screen, b: u8) void {
         '(', ')', '*', '+', '#', '%' => s.state = .esc_skip_one,
         '7' => s.saveCursor(),
         '8' => s.restoreCursor(),
-        'M' => { // reverse index
-            const top = s.screenTop();
-            if (s.cur_row > top) s.cur_row -= 1;
-        },
+        'M' => s.reverseIndex(),
         'D' => s.lineFeed(),
         'E' => {
             s.lineFeed();
             s.cur_col = 0;
         },
         'c' => {
+            if (s.alt != null) s.leaveAlt();
             s.pen = .{};
+            s.region_top = 0;
+            s.region_bot = s.rows - 1;
+            s.app_cursor = false;
+            s.cursor_hidden = false;
+            s.bracketed_paste = false;
             s.clear();
         },
         else => {},
@@ -412,11 +475,16 @@ fn oscEnd(s: *Screen) void {
     s.has_marks = true;
     switch (p[4]) {
         'A' => s.zone = .none,
-        'B' => s.zone = .input,
+        'B' => {
+            s.zone = .input;
+            s.cmd_start = .{ .row = s.cur_row, .col = s.cur_col };
+        },
         'C' => {
+            s.readCommand();
             if (s.ai == .armed) s.ai = .running;
             s.last_output = .{ .start = s.fed + 1 };
             s.out_rows = .{ .start = s.cur_row + @intFromBool(s.cur_col > 0), .end = null };
+            s.colored = false;
             s.at_prompt = false;
             s.zone = .output;
         },
@@ -429,6 +497,9 @@ fn oscEnd(s: *Screen) void {
             };
             if (s.out_rows) |*r| if (r.end == null) {
                 r.end = @max(s.cur_row + @intFromBool(s.cur_col > 0), r.start);
+                s.done_colored = s.colored;
+                s.done_status = if (p.len > 6) std.fmt.parseInt(u8, p[6..], 10) catch null else null;
+                s.done_seq +%= 1;
             };
         },
         else => {},
@@ -515,16 +586,52 @@ fn param(s: *const Screen, i: usize, default: u32) u32 {
     return if (s.params[i] == 0) default else s.params[i];
 }
 
-/// DEC private modes (`ESC[?…h` / `ESC[?…l`): only bracketed paste is
-/// kept for now; the rest are ignored.
+/// DEC private modes (`ESC[?…h` / `ESC[?…l`): application cursor keys,
+/// the cursor shown / hidden, the alternate screen and bracketed paste;
+/// the rest are ignored.
 fn privateMode(s: *Screen, final: u8) void {
     if (s.private != '?' or (final != 'h' and final != 'l')) return;
-    for (s.params[0..s.nparams]) |p| if (p == 2004) {
-        s.bracketed_paste = final == 'h';
+    const on = final == 'h';
+    for (s.params[0..s.nparams]) |p| switch (p) {
+        1 => s.app_cursor = on,
+        25 => s.cursor_hidden = !on,
+        47, 1047, 1049 => if (on) s.enterAlt() else s.leaveAlt(),
+        2004 => s.bracketed_paste = on,
+        else => {},
     };
 }
 
+/// The answers queued since the last call (see `reply_buf`).
+pub fn takeReplies(s: *Screen) []const u8 {
+    const r = s.reply_buf[0..s.reply_len];
+    s.reply_len = 0;
+    return r;
+}
+
+fn reply(s: *Screen, comptime fmt: []const u8, args: anytype) void {
+    const r = std.fmt.bufPrint(s.reply_buf[s.reply_len..], fmt, args) catch return;
+    s.reply_len += r.len;
+}
+
+/// Device status reports (`ESC[5n`, `ESC[6n`, DEC's `ESC[?6n`) and the
+/// primary device attributes (`ESC[c`: a VT220 with color, as xterm says).
+fn query(s: *Screen, final: u8) void {
+    const row = s.cur_row -| s.screenTop() + 1;
+    const col = @as(u32, s.cur_col) + 1;
+    const p0: u32 = if (s.nparams == 0) 0 else s.params[0];
+    switch (s.private) {
+        0 => switch (final) {
+            'n' => if (p0 == 5) s.reply("\x1b[0n", .{}) else if (p0 == 6) s.reply("\x1b[{d};{d}R", .{ row, col }),
+            'c' => if (p0 == 0) s.reply("\x1b[?62;22c", .{}),
+            else => {},
+        },
+        '?' => if (final == 'n' and p0 == 6) s.reply("\x1b[?{d};{d}R", .{ row, col }),
+        else => {},
+    }
+}
+
 fn dispatchCsi(s: *Screen, final: u8) void {
+    if (final == 'n' or final == 'c') return s.query(final);
     if (s.private != 0) return s.privateMode(final);
     const top = s.screenTop();
     switch (final) {
@@ -582,6 +689,29 @@ fn dispatchCsi(s: *Screen, final: u8) void {
         },
         's' => s.saveCursor(),
         'u' => s.restoreCursor(),
+        'r' => { // scroll region; the cursor goes home
+            const t = s.param(0, 1) - 1;
+            const b = @min(s.param(1, s.rows), s.rows) - 1;
+            if (t < b) {
+                s.region_top = @intCast(t);
+                s.region_bot = @intCast(b);
+            } else {
+                s.region_top = 0;
+                s.region_bot = s.rows - 1;
+            }
+            s.cur_row = top;
+            s.cur_col = 0;
+            s.ensureLine(s.cur_row);
+        },
+        'L', 'M' => { // insert / delete lines: the region's rows from the cursor
+            if (s.cur_row < top) return;
+            const rel = s.cur_row - top;
+            if (rel < s.region_top or rel > s.regionBot()) return;
+            s.scrollRows(rel, s.regionBot(), s.param(0, 1), final == 'L');
+            s.cur_col = 0;
+        },
+        'S' => s.scrollRows(s.region_top, s.regionBot(), s.param(0, 1), false),
+        'T' => if (s.nparams <= 1) s.scrollRows(s.region_top, s.regionBot(), s.param(0, 1), true),
         else => {},
     }
 }
@@ -608,12 +738,12 @@ fn sgr(s: *Screen) void {
             23 => s.pen.attrs.italic = false,
             24 => s.pen.attrs.underline = false,
             27 => s.pen.attrs.inverse = false,
-            30...37 => s.pen.fg = Color.indexed(@intCast(p - 30)),
+            30...37 => s.setFg(Color.indexed(@intCast(p - 30))),
             39 => s.pen.fg = .{},
-            40...47 => s.pen.bg = Color.indexed(@intCast(p - 40)),
+            40...47 => s.setBg(Color.indexed(@intCast(p - 40))),
             49 => s.pen.bg = .{},
-            90...97 => s.pen.fg = Color.indexed(@intCast(p - 90 + 8)),
-            100...107 => s.pen.bg = Color.indexed(@intCast(p - 100 + 8)),
+            90...97 => s.setFg(Color.indexed(@intCast(p - 90 + 8))),
+            100...107 => s.setBg(Color.indexed(@intCast(p - 100 + 8))),
             38, 48 => {
                 var c: Color = .{};
                 if (i + 1 < s.nparams and s.params[i + 1] == 5 and i + 2 < s.nparams) {
@@ -627,11 +757,190 @@ fn sgr(s: *Screen) void {
                     );
                     i += 4;
                 } else break;
-                if (p == 38) s.pen.fg = c else s.pen.bg = c;
+                if (p == 38) s.setFg(c) else s.setBg(c);
             },
             else => {},
         }
     }
+}
+
+/// The C mark: the command line typed since the B mark (input cells only;
+/// wrapped rows joined, others with a line feed) into `last_cmd`.
+fn readCommand(s: *Screen) void {
+    const st = s.cmd_start orelse return;
+    s.cmd_start = null;
+    var n: usize = 0;
+    var row = st.row;
+    while (row <= s.cur_row and row < s.lines.items.len) : (row += 1) {
+        const l = s.lines.items[row].items;
+        var col: usize = if (row == st.row) st.col else 0;
+        while (col < l.len) : (col += 1) {
+            const cell = l[col];
+            if (cell.attrs.zone != .input or cell.cp == 0) continue;
+            n += std.unicode.utf8Encode(cell.cp, s.last_cmd_buf[n..][0..@min(4, s.last_cmd_buf.len - n)]) catch break;
+        }
+        if (!s.isWrapped(row) and row < s.cur_row and n < s.last_cmd_buf.len) {
+            s.last_cmd_buf[n] = '\n';
+            n += 1;
+        }
+    }
+    s.last_cmd_len = std.mem.trimEnd(u8, s.last_cmd_buf[0..n], " \n").len;
+    s.cmd_seq +%= 1;
+}
+
+/// The command line the shell got last (C mark).
+pub fn lastCommand(s: *const Screen) []const u8 {
+    return std.mem.trim(u8, s.last_cmd_buf[0..s.last_cmd_len], " ");
+}
+
+/// At the prompt with something typed on the input line already.
+pub fn inputPending(s: *const Screen) bool {
+    if (!s.at_prompt) return false;
+    const st = s.cmd_start orelse return false;
+    var row = st.row;
+    while (row <= s.cur_row and row < s.lines.items.len) : (row += 1) {
+        const l = s.lines.items[row].items;
+        var col: usize = if (row == st.row) st.col else 0;
+        while (col < l.len) : (col += 1) {
+            if (l[col].attrs.zone == .input and l[col].cp != ' ' and l[col].cp != 0) return true;
+        }
+    }
+    return false;
+}
+
+/// A color set by the program (`colored`).
+fn setFg(s: *Screen, c: Color) void {
+    s.pen.fg = c;
+    s.colored = true;
+}
+
+fn setBg(s: *Screen, c: Color) void {
+    s.pen.bg = c;
+    s.colored = true;
+}
+
+/// Rows and lookups `markFolders` does at most (a huge output stays fast).
+const folder_rows_max = 3000;
+const folder_checks_max = 4000;
+
+/// What `markNames` colors.
+pub const NameKind = enum { none, folder, link_file, link_folder };
+
+/// Folder and link names in plain output: on rows [start, end) (wrapped
+/// rows joined), every word, or run of up to 4 words joined by single
+/// spaces, that `ctx.kind(name)` says is a folder or a symbolic link
+/// (longest first; a trailing `:`, `,` or `@` (ls -F) left out) gets its
+/// color (`Color.folder()`, `.link_file`, `.link_folder`) where the text
+/// has no color of its own; only output cells (zone `.output`).
+/// `ctx.found(kind, range, name)` hears of each. True when any cell
+/// changed.
+pub fn markNames(s: *Screen, start: usize, end: usize, ctx: anytype) bool {
+    const stop = @min(end, s.lines.items.len);
+    var row = if (stop > folder_rows_max) @max(start, stop - folder_rows_max) else start;
+    // A logical line's cells: where each one is.
+    var at: [1024]struct { row: usize, col: usize } = undefined;
+    var checks: usize = 0;
+    var changed = false;
+    while (row < stop) {
+        var n: usize = 0;
+        while (row < stop) : (row += 1) {
+            for (s.lines.items[row].items, 0..) |_, col| {
+                if (n == at.len) break;
+                at[n] = .{ .row = row, .col = col };
+                n += 1;
+            }
+            if (!s.isWrapped(row)) {
+                row += 1;
+                break;
+            }
+        }
+        // Words: [a, b) in `at`.
+        var words: [128][2]usize = undefined;
+        var nw: usize = 0;
+        var k: usize = 0;
+        while (k < n and nw < words.len) {
+            while (k < n and s.cellAt(at[k].row, at[k].col).cp == ' ') k += 1;
+            if (k == n) break;
+            const a = k;
+            while (k < n and s.cellAt(at[k].row, at[k].col).cp != ' ') k += 1;
+            words[nw] = .{ a, k };
+            nw += 1;
+        }
+        var wi: usize = 0;
+        while (wi < nw) {
+            var took: usize = 1;
+            var j: usize = @min(nw - wi, 4);
+            found: while (j > 0) : (j -= 1) {
+                const last = wi + j - 1;
+                // Joined by single spaces only.
+                for (wi..last) |x| if (words[x + 1][0] != words[x][1] + 1) continue :found;
+                const a = words[wi][0];
+                var b = words[last][1];
+                var name: [file_name_max]u8 = undefined;
+                var trims: usize = 0;
+                while (trims < 2) : (trims += 1) {
+                    if (checks >= folder_checks_max) return changed;
+                    const len = s.cellsText(at[a..b], &name) orelse break;
+                    if (len == 0) break;
+                    checks += 1;
+                    const kind = ctx.kind(name[0..len]);
+                    if (kind != .none) {
+                        const col: Color = .{ .tag = switch (kind) {
+                            .folder => .folder,
+                            .link_file => .link_file,
+                            else => .link_folder,
+                        } };
+                        for (at[a..b]) |p| {
+                            const cell = &s.lines.items[p.row].items[p.col];
+                            if (cell.fg.tag != .default or cell.attrs.zone != .output) continue;
+                            cell.fg = col;
+                            changed = true;
+                        }
+                        const p0 = s.textPos(at[a].row, @intCast(at[a].col));
+                        const p1 = s.textPos(at[b - 1].row, @intCast(at[b - 1].col));
+                        if (p0 != null and p1 != null) {
+                            ctx.found(kind, .{ .start = p0.?, .end = .{ .line = p1.?.line, .col = p1.?.col + 1 } }, name[0..len]);
+                        }
+                        took = j;
+                        break :found;
+                    }
+                    const lc = s.cellAt(at[b - 1].row, at[b - 1].col).cp;
+                    if (b - a < 2 or (lc != ':' and lc != ',' and lc != '@')) break;
+                    b -= 1;
+                }
+            }
+            wi += took;
+        }
+    }
+    if (changed) s.generation +%= 1;
+    return changed;
+}
+
+const file_name_max = 1024;
+
+/// Take `markNames`' colors off every cell (the setting turned off).
+pub fn clearNames(s: *Screen) void {
+    for (s.lines.items) |l| for (l.items) |*cell| {
+        if (cell.fg.isName()) cell.fg = .{};
+    };
+    s.generation +%= 1;
+}
+
+fn cellAt(s: *const Screen, row: usize, col: usize) Cell {
+    return s.lines.items[row].items[col];
+}
+
+/// The cells' text as UTF-8 in `buf` (spacers and pads left out); null
+/// when it doesn't fit.
+fn cellsText(s: *const Screen, cells: anytype, buf: []u8) ?usize {
+    var n: usize = 0;
+    for (cells) |p| {
+        const cell = s.cellAt(p.row, p.col);
+        if (cell.cp == 0) continue;
+        n += std.unicode.utf8Encode(cell.cp, buf[n..][0..@min(4, buf.len - n)]) catch return null;
+        if (cell.extra != 0) n += std.unicode.utf8Encode(cell.extra, buf[n..][0..@min(4, buf.len - n)]) catch return null;
+    }
+    return n;
 }
 
 // ---------------------------------------------------------------- editing
@@ -684,7 +993,8 @@ fn put(s: *Screen, cp: u21) void {
     var cell = s.pen;
     cell.cp = cp;
     cell.attrs.wide = w == 2 and s.cols >= 2;
-    cell.attrs.zone = if (s.echo) .input else if (s.ai != .off and s.zone != .none) .ai else s.zone;
+    // A full-screen program's page gets no marks (its echo isn't a typed line).
+    cell.attrs.zone = if (s.alt != null) .none else if (s.echo) .input else if (s.ai != .off and s.zone != .none) .ai else s.zone;
     if (cell.attrs.wide) s.setCell(s.cur_col + 1, s.blank()); // the old pair there is split first
     s.setCell(s.cur_col, cell);
     if (cell.attrs.wide) {
@@ -735,10 +1045,129 @@ fn repairWide(s: *Screen, row: usize) void {
     }
 }
 
+fn regionBot(s: *const Screen) u16 {
+    return @min(s.region_bot, s.rows - 1);
+}
+
+/// Scrolling keeps to the screen's rows (no scrollback): a region that
+/// isn't the whole screen, or the alternate screen.
+fn scrollsInPlace(s: *const Screen) bool {
+    return s.alt != null or s.region_top != 0 or s.regionBot() != s.rows - 1;
+}
+
+/// Scroll the live screen's rows `a..b` (0-based, inclusive) by `n`: up
+/// (the top rows go, blank rows come in at the bottom) or down.
+fn scrollRows(s: *Screen, a: usize, b: usize, n_in: u32, down: bool) void {
+    if (a > b) return;
+    const top = s.screenTop();
+    s.ensureLine(top + s.rows - 1);
+    const n = @min(n_in, b - a + 1);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const out_at = top + if (down) b else a;
+        const in_at = top + if (down) a else b;
+        var gone = s.lines.orderedRemove(out_at);
+        gone.deinit(s.gpa);
+        _ = s.wrapped.orderedRemove(out_at);
+        s.lines.insert(s.gpa, in_at, s.blankLine()) catch return;
+        s.wrapped.insert(s.gpa, in_at, false) catch {
+            var l = s.lines.orderedRemove(in_at);
+            l.deinit(s.gpa);
+            return;
+        };
+    }
+    // The rows above stay; one wrapping into the region doesn't any more.
+    if (top + a > 0) s.setWrapped(top + a - 1, false);
+    s.setWrapped(top + b, false);
+}
+
+/// A new blank row: empty, or filled with the pen's background when it
+/// has one (as xterm's background color erase).
+fn blankLine(s: *Screen) Line {
+    var l: Line = .empty;
+    if (s.pen.bg.tag != .default) {
+        l.appendNTimes(s.gpa, s.blank(), s.cols) catch {};
+    }
+    return l;
+}
+
+fn reverseIndex(s: *Screen) void {
+    const top = s.screenTop();
+    if (s.cur_row >= top and s.cur_row - top == s.region_top) {
+        s.scrollRows(s.region_top, s.regionBot(), 1, true);
+    } else if (s.cur_row > top) s.cur_row -= 1;
+}
+
+fn enterAlt(s: *Screen) void {
+    if (s.alt != null) return;
+    const base = s.lineCount();
+    s.alt = .{ .base = base, .row = s.cur_row, .col = s.cur_col };
+    s.cur_row = base;
+    s.cur_col = 0;
+    s.scroll = 0;
+    s.fitAltPage();
+    var r = base;
+    while (r < s.lines.items.len) : (r += 1) {
+        s.lines.items[r].clearRetainingCapacity();
+        s.wrapped.items[r] = false;
+    }
+    s.trim();
+}
+
+/// The alternate page is exactly `rows` rows from its base.
+fn fitAltPage(s: *Screen) void {
+    const a = s.alt orelse return;
+    const end = a.base + s.rows;
+    s.ensureLine(end - 1);
+    while (s.lines.items.len > end) {
+        var l = s.lines.pop().?;
+        l.deinit(s.gpa);
+        _ = s.wrapped.pop();
+    }
+    s.cur_row = std.math.clamp(s.cur_row, a.base, end - 1);
+}
+
+fn leaveAlt(s: *Screen) void {
+    const a = s.alt orelse return;
+    s.alt = null;
+    while (s.lines.items.len > a.base) {
+        var l = s.lines.pop().?;
+        l.deinit(s.gpa);
+        _ = s.wrapped.pop();
+    }
+    s.cur_row = a.row;
+    s.cur_col = @min(a.col, s.cols - 1);
+    s.ensureLine(s.cur_row);
+    s.region_top = 0;
+    s.region_bot = s.rows - 1;
+    s.scroll = 0;
+    const last = s.lines.items.len;
+    if (s.sel) |sel| {
+        const x, const y = sel.ordered();
+        if (x.row >= last or y.row >= last) s.sel = null;
+    }
+    if (s.out_rows) |*r| {
+        r.start = @min(r.start, last);
+        if (r.end) |*e| e.* = @min(e.*, last);
+    }
+    if (s.typed_row) |*t| t.* = @min(t.*, last);
+    s.lf_row = @min(s.lf_row, last);
+    s.saved_row = @min(s.saved_row, last - 1);
+}
+
 fn lineFeed(s: *Screen) void {
+    if (s.scrollsInPlace()) {
+        const rel = s.cur_row -| s.screenTop();
+        if (rel == s.regionBot()) return s.scrollRows(s.region_top, s.regionBot(), 1, false);
+        if (rel + 1 >= s.rows) return; // the last row, below the region: stays
+        s.cur_row += 1;
+        s.ensureLine(s.cur_row);
+        return;
+    }
+    const end = s.viewEnd();
     s.cur_row += 1;
     s.ensureLine(s.cur_row);
-    if (s.scroll > 0) s.scroll += 1; // keep the user's scrolled view stable
+    if (s.scroll > 0) s.scroll += s.viewEnd() - end; // keep the user's scrolled view stable
     s.trim();
 }
 
@@ -772,6 +1201,10 @@ fn trim(s: *Screen) void {
     }
     if (s.typed_row) |*t| t.* -|= chunk;
     s.lf_row -|= chunk;
+    if (s.alt) |*a| {
+        a.base -|= chunk;
+        a.row -|= chunk;
+    }
 }
 
 fn eraseLine(s: *Screen, mode: u32) void {
@@ -806,7 +1239,14 @@ fn eraseDisplay(s: *Screen, mode: u32) void {
             }
             s.eraseLine(1);
         },
-        2 => {
+        2 => if (s.alt != null or s.scrollsInPlace()) {
+            const top = s.screenTop();
+            s.ensureLine(top + s.rows - 1);
+            for (s.lines.items[top .. top + s.rows], s.wrapped.items[top .. top + s.rows]) |*l, *w| {
+                l.clearRetainingCapacity();
+                w.* = false;
+            }
+        } else {
             // Like a classic terminal: push the current screen into scrollback.
             const used = s.lineCount();
             const rel = s.cur_row - s.screenTop();
@@ -815,7 +1255,7 @@ fn eraseDisplay(s: *Screen, mode: u32) void {
             s.ensureLine(s.cur_row);
             s.trim();
         },
-        3 => s.clear(),
+        3 => if (s.alt == null) s.clear(),
         else => {},
     }
 }
@@ -854,7 +1294,7 @@ fn reflow(s: *Screen, new_cols: u16) !void {
         .{ .row = s.saved_row, .col = s.saved_col },
         .{ .row = 0, .col = 0 }, // selection anchor
         .{ .row = 0, .col = 0 }, // selection head
-        .{ .row = (s.lineCount() -| s.scroll) -| s.rows, .col = 0 }, // view top
+        .{ .row = (s.viewEnd() -| s.scroll) -| s.rows, .col = 0 }, // view top
         // The copy-flash rows (out_rows, typed_row, lf_row), at their
         // rows' starts.
         .{ .row = if (s.out_rows) |r| r.start else 0, .col = 0 },
@@ -986,7 +1426,7 @@ fn reflow(s: *Screen, new_cols: u16) !void {
         sel.anchor = .{ .row = @min(marks[2].row, top), .col = @intCast(@min(marks[2].col, new)) };
         sel.head = .{ .row = @min(marks[3].row, top), .col = @intCast(@min(marks[3].col, new)) };
     }
-    if (s.scroll > 0) s.scroll = (s.lineCount() -| s.rows) -| marks[4].row;
+    if (s.scroll > 0) s.scroll = (s.viewEnd() -| s.rows) -| marks[4].row;
     if (s.out_rows) |*r| {
         r.start = @min(marks[5].row, top + 1);
         if (r.end) |*e| e.* = @min(marks[6].row, top + 1);
@@ -1193,6 +1633,7 @@ fn sgrColor(buf: []u8, c: Color, base: u8) ![]const u8 {
         .default => "",
         .indexed => try std.fmt.bufPrint(buf, ";{d};5;{d}", .{ base, c.v[0] }),
         .rgb => try std.fmt.bufPrint(buf, ";{d};2;{d};{d};{d}", .{ base, c.v[0], c.v[1], c.v[2] }),
+        .folder, .link_file, .link_folder => "", // gtty's own marking, not the program's
     };
 }
 
@@ -1221,6 +1662,23 @@ test "carriage return overwrite and erase line (progress bars)" {
     const t = try textOf(&s);
     defer std.testing.allocator.free(t);
     try std.testing.expectEqualStrings("100% done", t);
+}
+
+test "a block redrawn in place (docker's progress) keeps the view still" {
+    var s = Screen.init(std.testing.allocator);
+    defer s.deinit();
+    s.resize(20, 5);
+    s.feed("a\r\nb\r\nc\r\nd\r\ne\r\nf\r\n[+] 1\r\n x\r\n");
+    const end = s.viewEnd();
+    // Mid-redraw: the cursor went back up over the block.
+    s.feed("\x1b[1A\x1b[1A\x1b[0G[+] 2");
+    try std.testing.expectEqual(end, s.viewEnd());
+    s.feed("\r\n y\r\n");
+    try std.testing.expectEqual(end, s.viewEnd());
+    // Scrolled back, the redraw doesn't move what the user looks at.
+    s.scrollBy(3);
+    s.feed("\x1b[1A\x1b[1A\x1b[0G[+] 3\r\n z\r\n");
+    try std.testing.expectEqual(@as(usize, 3), s.scroll);
 }
 
 test "osc title is skipped, utf8 decoded, wrap at cols" {
@@ -1323,6 +1781,76 @@ test "zones: prompt, typed command, output" {
     p.feed("hello\r\nhello\r\n");
     try std.testing.expectEqual(Zone.input, p.rowZone(0));
     try std.testing.expectEqual(Zone.output, p.rowZone(1));
+}
+
+test "scroll region: a line feed on its last row scrolls only the region (vim)" {
+    var s = Screen.init(std.testing.allocator);
+    defer s.deinit();
+    s.resize(10, 4);
+    s.feed("1\r\n2\r\n3\r\nstatus");
+    s.feed("\x1b[1;3r\x1b[3;1H\n4");
+    const t = try textOf(&s);
+    defer std.testing.allocator.free(t);
+    try std.testing.expectEqualStrings("2\n3\n4\nstatus", t);
+    // Reverse index on the region's first row scrolls it back down.
+    s.feed("\x1b[1;1H\x1bM0");
+    const t2 = try textOf(&s);
+    defer std.testing.allocator.free(t2);
+    try std.testing.expectEqualStrings("0\n2\n3\nstatus", t2);
+}
+
+test "insert / delete lines and scroll up / down" {
+    var s = Screen.init(std.testing.allocator);
+    defer s.deinit();
+    s.resize(10, 4);
+    s.feed("a\r\nb\r\nc\r\nd\x1b[2;1H\x1b[M");
+    const t = try textOf(&s);
+    defer std.testing.allocator.free(t);
+    try std.testing.expectEqualStrings("a\nc\nd", t);
+    s.feed("\x1b[L\x1b[S");
+    const t2 = try textOf(&s);
+    defer std.testing.allocator.free(t2);
+    try std.testing.expectEqualStrings("\nc\nd", t2);
+    s.feed("\x1b[T");
+    const t3 = try textOf(&s);
+    defer std.testing.allocator.free(t3);
+    try std.testing.expectEqualStrings("\n\nc\nd", t3);
+}
+
+test "alternate screen: a page of its own, gone on leaving" {
+    var s = Screen.init(std.testing.allocator);
+    defer s.deinit();
+    s.resize(10, 3);
+    s.feed("$ vim\r\n");
+    s.feed("\x1b[?1049h\x1b[?1h\x1b[H\x1b[2Jx\r\ny\r\nz\r\nw");
+    try std.testing.expect(s.app_cursor);
+    const t = try textOf(&s);
+    defer std.testing.allocator.free(t);
+    try std.testing.expectEqualStrings("$ vim\n\ny\nz\nw", t); // no scrollback added: x went
+    s.feed("\x1b[?1l\x1b[?1049l$ x");
+    try std.testing.expect(!s.app_cursor);
+    const t2 = try textOf(&s);
+    defer std.testing.allocator.free(t2);
+    try std.testing.expectEqualStrings("$ vim\n$ x", t2);
+    // A resize while on it keeps the page and the place to come back to.
+    s.feed("\x1b[?1049hpage");
+    s.resize(6, 4);
+    s.feed("\x1b[?1049l");
+    try std.testing.expectEqual(@as(usize, 1), s.cur_row);
+}
+
+test "queries: cursor position, device status and attributes are answered" {
+    var s = Screen.init(std.testing.allocator);
+    defer s.deinit();
+    s.resize(20, 5);
+    s.feed("a\r\nbc\x1b[6n");
+    try std.testing.expectEqualStrings("\x1b[2;3R", s.takeReplies());
+    try std.testing.expectEqualStrings("", s.takeReplies());
+    s.feed("\x1b[5n\x1b[c\x1b[?6n\x1b[>c");
+    try std.testing.expectEqualStrings("\x1b[0n\x1b[?62;22c\x1b[?2;3R", s.takeReplies());
+    // Relative to the live screen, not the scrollback.
+    s.feed("\r\n\r\n\r\n\r\n\r\nx\x1b[6n");
+    try std.testing.expectEqualStrings("\x1b[5;2R", s.takeReplies());
 }
 
 test "typed output: the answer to the last line typed (ssh, no marks)" {
@@ -1472,6 +2000,9 @@ test "bracketed paste mode follows ESC[?2004h / l" {
     try std.testing.expect(s.bracketed_paste);
     s.feed("\x1b[?25l"); // another private mode: no change
     try std.testing.expect(s.bracketed_paste);
+    try std.testing.expect(s.cursor_hidden);
+    s.feed("\x1b[?25h");
+    try std.testing.expect(!s.cursor_hidden);
     s.feed("\x1b[?2004l");
     try std.testing.expect(!s.bracketed_paste);
 }
@@ -1520,4 +2051,57 @@ test "copy flash rows: the last command's output, through reflow" {
     s.resize(60, 5);
     try std.testing.expectEqual(@as(usize, 4), s.out_rows.?.start);
     try std.testing.expectEqual(@as(?usize, 5), s.out_rows.?.end);
+}
+
+test "folder names in plain output" {
+    var s = Screen.init(std.testing.allocator);
+    defer s.deinit();
+    s.resize(40, 5);
+    s.feed("$ ls\r\n\x1b]133;C\x07a.txt  src  My Dir  docs:\r\n\x1b]133;D;0\x07$ ");
+    try std.testing.expect(!s.done_colored);
+    try std.testing.expectEqual(@as(u32, 1), s.done_seq);
+    const Dirs = struct {
+        links: usize = 0,
+        pub fn kind(_: *@This(), name: []const u8) NameKind {
+            if (std.mem.eql(u8, name, "a.txt")) return .link_file;
+            for ([_][]const u8{ "src", "My Dir", "docs" }) |d| if (std.mem.eql(u8, d, name)) return .folder;
+            return .none;
+        }
+        pub fn found(d: *@This(), k: NameKind, range: TextRange, _: []const u8) void {
+            if (k == .link_file) {
+                d.links += 1;
+                std.testing.expectEqual(@as(u32, 0), range.start.col) catch unreachable;
+                std.testing.expectEqual(@as(u32, 5), range.end.col) catch unreachable;
+            }
+        }
+    };
+    var dirs: Dirs = .{};
+    const r = s.out_rows.?;
+    try std.testing.expect(s.markNames(r.start, r.end.?, &dirs));
+    try std.testing.expectEqual(@as(usize, 1), dirs.links);
+    const l = s.lines.items[r.start].items;
+    try std.testing.expectEqual(Color.Tag.link_file, l[0].fg.tag); // a.txt
+    try std.testing.expectEqual(Color.Tag.folder, l[7].fg.tag); // src
+    try std.testing.expectEqual(Color.Tag.folder, l[12].fg.tag); // My
+    try std.testing.expectEqual(Color.Tag.folder, l[15].fg.tag); // Dir
+    try std.testing.expectEqual(Color.Tag.folder, l[14].fg.tag); // the space in "My Dir"
+    try std.testing.expectEqual(Color.Tag.folder, l[22].fg.tag); // docs
+    try std.testing.expectEqual(Color.Tag.default, l[24].fg.tag); // the ":"
+    // Colored output is left alone (the window doesn't call markFolders).
+    s.feed("ls\r\n\x1b]133;C\x07\x1b[34msrc\x1b[0m\r\n\x1b]133;D;0\x07\x1b[32m$\x1b[0m ");
+    try std.testing.expect(s.done_colored);
+}
+
+test "the command line, read back at C" {
+    var s = Screen.init(std.testing.allocator);
+    defer s.deinit();
+    s.resize(40, 5);
+    s.feed("\x1b]133;D;0\x07$ \x1b]133;B\x07"); // the first prompt
+    try std.testing.expect(!s.inputPending());
+    s.feed("ls -l");
+    try std.testing.expect(s.inputPending());
+    s.feed("\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07$ \x1b]133;B\x07");
+    try std.testing.expectEqualStrings("ls -l", s.lastCommand());
+    try std.testing.expectEqual(@as(u32, 1), s.cmd_seq);
+    try std.testing.expect(!s.inputPending());
 }

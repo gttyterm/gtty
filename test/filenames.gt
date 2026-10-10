@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The file opener and names with blanks / punctuation (DirCache: the
+# folder's listing). Run from a scratch folder made like this:
+#   mkdir -p 'w/My Dir' && cd w && touch 'My File.txt' 'a (1).pdf' plain.txt 'My Dir/Big Plan.md'
+#   gtty --script $REPO/test/filenames.gt
+# Expect outlines on: My File.txt, My Dir (cd), a (1).pdf (not its
+# sentence's period), My Dir/Big Plan.md.
+/s bash
+/wait 1500
+/type clear
+/wait 500
+/type LC_ALL=C ls -1; echo "saved to a (1).pdf. and My Dir/Big Plan.md"
+/wait 800
+# My Dir
+/move 66 84
+/wait 300
+/shot names-1.bmp
+/move 66 102
+/wait 300
+/shot names-2.bmp
+/move 34 120
+/wait 300
+/shot names-3.bmp
+/move 114 156
+/wait 300
+/shot names-4.bmp
+/move 290 156
+/wait 300
+/shot names-5.bmp
+/quit

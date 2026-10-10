@@ -37,6 +37,7 @@ const git = @import("../core/git.zig");
 const remote = @import("../core/remote.zig");
 const RemoteLink = @import("../core/RemoteLink.zig");
 const FileOpener = @import("FileOpener.zig");
+const FileFx = @import("FileFx.zig");
 const Rect = Gfx.Rect;
 
 const JobWindow = @This();
@@ -119,6 +120,20 @@ folder_seq: u32 = 0,
 mem_seq: u32 = 0,
 mem_host: u64 = 0,
 folder_gen: u32 = 0,
+/// `out.done_seq` when names were last looked for (`colorNames`).
+folders_done: u32 = 0,
+/// The last listing command the user ran in this shell (`ls -l`, `ll`,
+/// …; `isListing`), run again after a file action (`refreshListing`),
+/// and `out.cmd_seq` when commands were last looked at.
+ls_cmd_buf: [256]u8 = undefined,
+ls_cmd_len: usize = 0,
+cmd_seen: u32 = 0,
+/// gtty typed a cd (`cdTo`): once it ended well, list the new folder
+/// (`refresh_ls`).
+list_after_cd: bool = false,
+/// Symbolic links `colorNames` found in the output: where, and what they
+/// point at (the hover box, `linkAt`). The newest `links_max`.
+links: std.ArrayList(Link) = .empty,
 
 rect: Rect = .{},
 zoom: f32 = 1.0,
@@ -145,9 +160,22 @@ opener: FileOpener = .{},
 /// The title-bar copy just took rows [first, end): a white flash over
 /// them, then a "Copied" bubble in their middle (`drawCopyFlash`).
 copy_flash: ?struct { first: usize, end: usize, ms: u64 } = null,
+/// What a mouse action just did to this window's folder's files (a drop
+/// copied in, …): the same flash and bubble as the copy (`drawFileFx`).
+file_fx: ?FileFx = null,
+/// File names put on gtty's file clipboard (copy / cut): a white flash
+/// over just those names (`flashNames`, `drawNameFlash`).
+name_flash: ?struct { ranges: [16]Screen.TextRange = undefined, n: usize = 0, ms: u64 } = null,
 /// When the user last typed into a program without shell marks (its echo
 /// counts as input for a short while: `Screen.echo`).
 echo_ms: u64 = 0,
+/// When the user last sent the job anything (keys, paste, a typed cd).
+key_ms: u64 = 0,
+/// When output last came that the user's typing didn't ask for (a build's
+/// progress lines being redrawn, …): the cursor stays hidden until the
+/// output rests `cursor_rest_ms`, so it doesn't jump around after the
+/// redraws (0: resting).
+busy_ms: u64 = 0,
 /// The selection was made with Shift + arrows in a shell's input line: its
 /// head follows the shell's cursor (see `editMove`).
 key_sel: bool = false,
@@ -302,6 +330,8 @@ pub fn destroy(w: *JobWindow, reaper: *Process.Reaper) void {
     if (w.log) |*l| l.close(w.gpa);
     for (w.folders_left.items) |d| w.gpa.free(d);
     w.folders_left.deinit(w.gpa);
+    for (w.links.items) |l| w.gpa.free(l.target);
+    w.links.deinit(w.gpa);
     w.folder_now.deinit(w.gpa);
     w.out.deinit();
     w.gpa.free(w.title);
@@ -321,10 +351,24 @@ pub fn pump(w: *JobWindow, gfx: *Gfx) bool {
     var budget: usize = 512 * 1024;
     const deadline = c.SDL_GetTicksNS() + pump_ns;
     if (w.out.echo and c.SDL_GetTicks() -| w.echo_ms > echo_ms_max) w.out.echo = false;
+    // A program redrawing its screen (docker's progress, …) writes a frame
+    // in many small writes: while they keep coming (`settle_ms` apart at
+    // most), read on, so a half-drawn frame isn't shown (the text would
+    // seem to jump).
     while (budget > 0 and c.SDL_GetTicksNS() < deadline) {
-        const chunk = w.proc.read(.out, &buf) orelse break;
+        const chunk = w.proc.read(.out, &buf) orelse {
+            if (!changed or !w.proc.waitOutput(settle_ms)) break;
+            continue;
+        };
         if (w.log) |*l| l.write(chunk);
         w.out.feed(chunk);
+        // Answers to the program's queries (cursor position, …) go straight
+        // to it: not typing, so neither mirrored nor refused (sync typing).
+        const replies = w.out.takeReplies();
+        if (replies.len > 0) {
+            trace.bytes("to", w.serial, replies);
+            w.proc.write(replies);
+        }
         // A keyboard selection ends where the shell put its cursor.
         if (w.key_sel) if (w.out.sel) |*sel| {
             sel.head = w.cursorPos();
@@ -333,6 +377,29 @@ pub fn pump(w: *JobWindow, gfx: *Gfx) bool {
         changed = true;
     }
     if (changed) if (w.log) |*l| l.flush(); // readable from outside as it comes
+    if (changed) {
+        const now = c.SDL_GetTicks();
+        if (now -| w.key_ms > echo_wait_ms) w.busy_ms = now;
+    }
+    // A command started: a listing one is remembered (`refreshListing`).
+    if (w.out.cmd_seq != w.cmd_seen) {
+        w.cmd_seen = w.out.cmd_seq;
+        const cmd = w.out.lastCommand();
+        if (isListing(cmd) and cmd.len <= w.ls_cmd_buf.len) {
+            @memcpy(w.ls_cmd_buf[0..cmd.len], cmd);
+            w.ls_cmd_len = cmd.len;
+        }
+    }
+    // A command in the shell ended: its output, if plain, gets its folder
+    // names colored.
+    if (w.out.done_seq != w.folders_done) {
+        w.folders_done = w.out.done_seq;
+        if (w.list_after_cd) {
+            w.list_after_cd = false;
+            if ((w.out.done_status orelse 0) == 0) _ = w.listFolder(true);
+        }
+        if (!w.out.done_colored) if (w.out.out_rows) |r| if (r.end) |e| w.colorNames(r.start, e);
+    }
     if (w.out.osc_cwd_gen != w.folder_gen) {
         w.folder_gen = w.out.osc_cwd_gen;
         w.folder_reports = true;
@@ -346,10 +413,143 @@ pub fn pump(w: *JobWindow, gfx: *Gfx) bool {
         w.ended_ms = c.SDL_GetTicks();
         if (w.kill_ms == 0) w.last_activity_ms = w.ended_ms; // a close / kill request already counted
         w.kill_menu = false;
+        // A job without shell marks (run from the prompt): all its output.
+        if (!w.out.has_marks and !w.out.colored) w.colorNames(0, w.out.lines.items.len);
         w.relayout(gfx) catch {}; // title-bar buttons change (copy appears)
         changed = true;
     }
     return changed;
+}
+
+/// A command line that only lists files, safe to run again: its first
+/// word is a listing program, and it has no pipes, redirections, lists
+/// or substitutions (`ls > x` must not run twice).
+fn isListing(cmd: []const u8) bool {
+    if (cmd.len == 0 or std.mem.indexOfAny(u8, cmd, ";|&<>`$()\n") != null) return false;
+    const end = std.mem.indexOfScalar(u8, cmd, ' ') orelse cmd.len;
+    const first = cmd[0..end];
+    for ([_][]const u8{ "ls", "ll", "la", "l", "lsd", "exa", "eza", "tree", "dir", "vdir", "gls" }) |name| {
+        if (std.mem.eql(u8, first, name)) return true;
+    }
+    return false;
+}
+
+test "listing commands" {
+    try std.testing.expect(isListing("ls"));
+    try std.testing.expect(isListing("ls -la sub"));
+    try std.testing.expect(isListing("ll"));
+    try std.testing.expect(!isListing("ls > x"));
+    try std.testing.expect(!isListing("ls | wc"));
+    try std.testing.expect(!isListing("lsof"));
+    try std.testing.expect(!isListing("cat x"));
+    try std.testing.expect(optionsOnly("ls -la"));
+    try std.testing.expect(!optionsOnly("ls -la sub"));
+}
+
+/// Only options after the program name (`ls -la`, not `ls -la sub`):
+/// the same listing works in another folder.
+fn optionsOnly(cmd: []const u8) bool {
+    var it = std.mem.tokenizeScalar(u8, cmd, ' ');
+    _ = it.next();
+    while (it.next()) |a| if (a[0] != '-') return false;
+    return true;
+}
+
+/// After a file action: run the last listing command again (else `ls`)
+/// so the output shows the folder as it is now.
+pub fn refreshListing(w: *JobWindow) bool {
+    return w.listFolder(false);
+}
+
+/// Run the last listing command (`new_folder`: after a cd, only one with
+/// no names in it; else `ls`). Only in a shell waiting at its prompt
+/// with nothing typed yet (that would be wiped), not a read-only window,
+/// not remote; `refresh_ls` on. True when it was sent.
+fn listFolder(w: *JobWindow, new_folder: bool) bool {
+    if (!refresh_ls or w.sync == .follower or !w.atPrompt() or w.out.inputPending()) return false;
+    var rbuf: [4096]u8 = undefined;
+    if (w.remoteNow(&rbuf) != null) return false;
+    const last = w.ls_cmd_buf[0..w.ls_cmd_len];
+    const cmd = if (last.len > 0 and (!new_folder or optionsOnly(last))) last else "ls";
+    var buf: [300]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "\x15{s}\r", .{cmd}) catch return false;
+    w.typeBytes(line);
+    return true;
+}
+
+/// A symbolic link in the output (`links`).
+pub const Link = struct {
+    range: Screen.TextRange,
+    /// Where it points: the real path (absolute; a broken link: its
+    /// target as written, made absolute).
+    target: [:0]u8,
+    folder: bool,
+    /// The target is gone.
+    broken: bool,
+};
+const links_max = 256;
+
+/// Folder and link names in plain output rows [start, end) (the program
+/// printed no colors): folders in the focus blue, symbolic links with a
+/// dash of pink (`Screen.markNames`); links are kept in `links`. Names
+/// are taken relative to the window's folder; nothing in a remote
+/// session.
+fn colorNames(w: *JobWindow, start: usize, end: usize) void {
+    if (!color_folders) return;
+    var rbuf: [4096]u8 = undefined;
+    if (w.remoteNow(&rbuf) != null) return;
+    var dbuf: [4096]u8 = undefined;
+    var ctx: NameCtx = .{ .w = w, .dir = w.folder(&dbuf) };
+    _ = w.out.markNames(start, end, &ctx);
+}
+
+const NameCtx = struct {
+    w: *JobWindow,
+    dir: []const u8,
+
+    pub fn kind(n: *NameCtx, name: []const u8) Screen.NameKind {
+        if (std.mem.eql(u8, name, "/")) return .none; // "a / b"
+        var pbuf: [4096]u8 = undefined;
+        const p = FileOpener.resolve(&pbuf, n.dir, std.mem.trimEnd(u8, name, "/")) orelse return .none;
+        var st: c.struct_stat = undefined;
+        if (c.lstat(p.ptr, &st) != 0) return .none;
+        const dir = FileOpener.kindOf(p) == .folder;
+        if (st.st_mode & 0o170000 == 0o120000) return if (dir) .link_folder else .link_file; // S_ISLNK
+        return if (dir) .folder else .none;
+    }
+
+    pub fn found(n: *NameCtx, k: Screen.NameKind, range: Screen.TextRange, name: []const u8) void {
+        if (k != .link_file and k != .link_folder) return;
+        const gpa = n.w.gpa;
+        var pbuf: [4096]u8 = undefined;
+        const p = FileOpener.resolve(&pbuf, n.dir, std.mem.trimEnd(u8, name, "/")) orelse return;
+        var tbuf: [4096]u8 = undefined;
+        var broken = false;
+        const target: []const u8 = if (c.realpath(p.ptr, &tbuf)) |r| std.mem.span(r) else blk: {
+            broken = true;
+            var lbuf: [4096]u8 = undefined;
+            const len = c.readlink(p.ptr, &lbuf, lbuf.len);
+            if (len <= 0) return;
+            const raw = lbuf[0..@intCast(len)];
+            const parent = std.fs.path.dirname(p) orelse "/";
+            break :blk FileOpener.resolve(&tbuf, parent, raw) orelse return;
+        };
+        const owned = gpa.dupeZ(u8, target) catch return;
+        const links = &n.w.links;
+        if (links.items.len >= links_max) gpa.free(links.orderedRemove(0).target);
+        links.append(gpa, .{ .range = range, .target = owned, .folder = k == .link_folder, .broken = broken }) catch gpa.free(owned);
+    }
+};
+
+/// The symbolic link name (colored, in the windows area) at (x, y).
+pub fn linkAt(w: *const JobWindow, x: f32, y: f32) ?*const Link {
+    const p = w.textPosAt(x, y) orelse return null;
+    var i = w.links.items.len;
+    while (i > 0) {
+        i -= 1;
+        if (w.links.items[i].range.contains(p)) return &w.links.items[i];
+    }
+    return null;
 }
 
 pub const Sync = enum { off, source, follower };
@@ -368,6 +568,7 @@ pub fn send(w: *JobWindow, bytes: []const u8) void {
         w.sync_refused = true;
         return;
     }
+    w.key_ms = c.SDL_GetTicks();
     w.proc.write(bytes);
     w.mirror(bytes);
 }
@@ -403,6 +604,7 @@ fn input(w: *JobWindow, bytes: []const u8) void {
         w.echo_ms = c.SDL_GetTicks();
     }
     w.out.scroll = 0;
+    w.key_ms = c.SDL_GetTicks();
     w.proc.write(bytes);
 }
 
@@ -566,6 +768,8 @@ fn repeat(w: *JobWindow, bytes: []const u8, n: usize) void {
 pub var hard_kill_ms: u64 = 2000;
 /// Longest one pump() may spend parsing output per frame.
 const pump_ns = 10 * std.time.ns_per_ms;
+/// How long `pump` waits for more of a burst of output before drawing.
+const settle_ms = 2;
 
 /// Kill the job: hang up first (lets programs clean up); if it is still
 /// running `hard_kill_ms` later, pump() kills it hard.
@@ -618,6 +822,13 @@ pub var anim_len_ms: u64 = 220;
 /// The left-edge marks (settings / GTTY_MARKS, GTTY_MARK_WIDTH): shown, and
 /// their width in points.
 pub var marks_on: bool = true;
+/// Folder names in output without colors: drawn blue (config
+/// `color-folders`, Settings → General; `colorFolders`).
+pub var color_folders: bool = true;
+/// After a file action done in gtty (paste, delete, trash, rename, a
+/// drop): run the shell's last listing command again (config
+/// `refresh-ls`, Settings → General; `refreshListing`).
+pub var refresh_ls: bool = true;
 pub var mark_pt: f32 = 4;
 /// Space between the window's frame and the marks strip, in points.
 const mark_gap: f32 = 3;
@@ -769,13 +980,17 @@ pub fn footHeight(gfx: *Gfx, scale: Scale) f32 {
     return @round(f.cell_h + 8 * scale.ui);
 }
 
+/// The git chip's text outside a git repo (dimmed, no peek).
+const no_git_label = "git";
+
 /// Longest branch name shown on the chip; the peek shows all of it.
 const chip_max_chars = 32;
 
 /// The chips, left in the footer, shown in the windows area while the job
-/// runs: the git chip inside a git repo, then the folder chip (the
-/// folder's name; not in a remote session, where the local folder means
-/// nothing).
+/// runs: the folder chip first (the folder's name; not in a remote
+/// session, where the local folder means nothing), then the git chip,
+/// always there: the branch inside a git repo, else dimmed (`no_git_label`,
+/// no peek).
 fn layoutChips(w: *JobWindow, gfx: *Gfx) void {
     w.git_chip_r = .{};
     w.folder_chip_r = .{};
@@ -786,13 +1001,11 @@ fn layoutChips(w: *JobWindow, gfx: *Gfx) void {
     const h = r.h - @round(3 * ui);
     const y = r.y + @round(r.h - h - @round(1 * ui));
     var x = r.x + @round(6 * ui);
-    if (w.branch()) |b| {
-        w.git_chip_r = .{ .x = x, .y = y, .w = chipWidth(f, ui, b), .h = h };
-        x += w.git_chip_r.w + @round(6 * ui);
-    }
     if (w.remote_len == 0) if (w.folderName()) |name| {
         w.folder_chip_r = .{ .x = x, .y = y, .w = chipWidth(f, ui, name), .h = h };
+        x += w.folder_chip_r.w + @round(6 * ui);
     };
+    w.git_chip_r = .{ .x = x, .y = y, .w = chipWidth(f, ui, w.branch() orelse no_git_label), .h = h };
 }
 
 fn chipWidth(f: *const Gfx.Face, ui: f32, label: []const u8) f32 {
@@ -873,8 +1086,16 @@ fn noteFolder(w: *JobWindow, dir: []const u8) void {
 
 /// Type `cd -- '<dir>'` + Enter into the shell (Ctrl+U first: whatever
 /// was typed on its line goes, so the line is just the cd). For a shell at
-/// its prompt (`atPrompt`).
+/// its prompt (`atPrompt`). When it ended well, the new folder is listed
+/// (`refresh_ls`, `listFolder`).
 pub fn cdTo(w: *JobWindow, dir: []const u8) void {
+    w.cdOnly(dir);
+    w.list_after_cd = refresh_ls;
+}
+
+/// `cdTo` without the listing after it (the AI: its plan's next step
+/// waits for the prompt).
+pub fn cdOnly(w: *JobWindow, dir: []const u8) void {
     var buf: [8300]u8 = undefined;
     var out: std.Io.Writer = .fixed(&buf);
     out.writeAll("\x15cd -- '") catch return;
@@ -1308,6 +1529,26 @@ pub fn tip(w: *const JobWindow, h: Hit) ?struct { text: []const u8, r: Rect } {
 /// Once a frame: true when the window needs a redraw (the "↑ N" label
 /// timed out).
 pub fn tick(w: *JobWindow, gfx: *Gfx, now: u64) bool {
+    // The name flash: redraw every frame while it shows.
+    if (w.name_flash) |f| {
+        if (now -| f.ms >= name_flash_ms) w.name_flash = null;
+        _ = w.tickFx(gfx, now);
+        return true;
+    }
+    return w.tickFx(gfx, now);
+}
+
+fn tickFx(w: *JobWindow, gfx: *Gfx, now: u64) bool {
+    // The file effect: the same, until it is over.
+    if (w.file_fx) |*f| {
+        if (f.over(now)) w.file_fx = null;
+        _ = w.tickCopyFlash(gfx, now);
+        return true;
+    }
+    return w.tickCopyFlash(gfx, now);
+}
+
+fn tickCopyFlash(w: *JobWindow, gfx: *Gfx, now: u64) bool {
     // The copy flash: redraw every frame while it shows.
     if (w.copy_flash) |f| {
         if (now -| f.ms < copy_flash_ms) {
@@ -1337,6 +1578,11 @@ fn tickRest(w: *JobWindow, gfx: *Gfx, now: u64) bool {
         if (now -| w.anim_ms >= anim_len_ms) w.anim_from = null;
         return true;
     }
+    // The output rested: the cursor comes back.
+    if (w.busy_ms != 0 and now -| w.busy_ms >= cursor_rest_ms) {
+        w.busy_ms = 0;
+        if (w.focused) chips = true;
+    }
     if (w.out.scroll_moves != w.scroll_seen) {
         w.scroll_seen = w.out.scroll_moves;
         w.scroll_ms = now;
@@ -1355,6 +1601,11 @@ fn tickRest(w: *JobWindow, gfx: *Gfx, now: u64) bool {
 const chips_refresh_ms = 1000;
 
 const scroll_label_ms = 2000;
+/// Output this soon after the user's typing is its answer (the echo, the
+/// command's first lines): the cursor stays.
+const echo_wait_ms = 300;
+/// Output nobody typed for hides the cursor until it rests this long.
+const cursor_rest_ms = 250;
 
 pub fn scrollAt(w: *JobWindow, lines: isize) void {
     w.out.scrollBy(lines);
@@ -1364,7 +1615,7 @@ pub fn scrollAt(w: *JobWindow, lines: isize) void {
 
 /// Absolute line index of the top visible row.
 fn viewTop(w: *const JobWindow) usize {
-    return (w.out.lineCount() -| w.out.scroll) -| w.out.rows;
+    return (w.out.viewEnd() -| w.out.scroll) -| w.out.rows;
 }
 
 fn viewRow(w: *const JobWindow, y: f32) u16 {
@@ -1457,6 +1708,34 @@ pub fn copiedRows(w: *const JobWindow) [2]usize {
     return .{ 0, n };
 }
 
+/// How long the name flash fades (as the copy's white flash).
+const name_flash_ms = copy_white_ms;
+
+/// File names copied / cut: a white flash over each of `ranges` (no
+/// bubble: the status bar says what to do next).
+pub fn flashNames(w: *JobWindow, ranges: []const Screen.TextRange) void {
+    var f: @TypeOf(w.name_flash.?) = .{ .ms = c.SDL_GetTicks() };
+    f.n = @min(ranges.len, f.ranges.len);
+    @memcpy(f.ranges[0..f.n], ranges[0..f.n]);
+    w.name_flash = f;
+}
+
+/// The name flash: the names' boxes flash white, fading out.
+fn drawNameFlash(w: *const JobWindow, gfx: *Gfx) void {
+    const f = w.name_flash orelse return;
+    if (w.anim_from != null) return;
+    const t = c.SDL_GetTicks() -| f.ms;
+    if (t >= name_flash_ms) return;
+    const left = 1 - @as(f32, @floatFromInt(t)) / @as(f32, name_flash_ms);
+    const alpha: u8 = @intFromFloat(@round(170 * left));
+    gfx.clip(w.out_r);
+    defer gfx.clip(null);
+    var rects: [8]Rect = undefined;
+    for (f.ranges[0..f.n]) |r| {
+        for (w.rangeRects(r, &rects)) |box| gfx.fillAlpha(box, .{ .r = 255, .g = 255, .b = 255 }, alpha);
+    }
+}
+
 /// Show what the title-bar copy took: a white flash over those rows, then
 /// a "Copied" bubble.
 pub fn flashCopied(w: *JobWindow) void {
@@ -1493,19 +1772,42 @@ fn drawCopyFlash(w: *const JobWindow, gfx: *Gfx, theme: *const Theme) void {
     }
     if (t < copy_bubble_ms) return;
     const face = w.chromeFace(gfx) catch return;
-    const label = "✓ Copied";
+    bubble(gfx, theme, face, box, "✓ Copied", theme.ok, ui);
+}
+
+/// The feedback bubble (copy, file effects): `label` in the title-bar
+/// colors, outlined in `col`, centered in `box` (its start kept in view
+/// when it is wider).
+pub fn bubble(gfx: *Gfx, theme: *const Theme, face: *Gfx.Face, box: Rect, label: []const u8, col: Rgb, ui: f32) void {
     const pad = @round(10 * ui);
     const bw = Gfx.textWidth(face, label) + 2 * pad;
     const bh = face.cell_h + pad;
     const br: Rect = .{
-        .x = @round(box.x + (box.w - bw) / 2),
+        .x = @round(@max(box.x + (box.w - bw) / 2, box.x)),
         .y = @round(box.y + (box.h - bh) / 2),
         .w = bw,
         .h = bh,
     };
     gfx.fill(br, theme.title_bg);
-    gfx.outline(br, theme.ok, @max(@round(ui), 1));
+    gfx.outline(br, col, @max(@round(ui), 1));
     _ = gfx.text(face, br.x + pad, br.y + @round(pad / 2), label, theme.prompt_fg);
+}
+
+/// The file effect (`file_fx`): the bubble (normal size) in the middle of
+/// the text, clipped to `area` (in the grid, the cell under its title
+/// bar).
+fn drawFileFx(w: *const JobWindow, gfx: *Gfx, theme: *const Theme, area: Rect) void {
+    const f = if (w.file_fx) |*f| f else return;
+    if (w.anim_from != null) return;
+    const now = c.SDL_GetTicks();
+    if (f.over(now)) return;
+    gfx.clip(area);
+    defer gfx.clip(null);
+    if (!f.bubbleShown(now)) return;
+    const face = w.chromeFace(gfx) catch return;
+    var buf: [256]u8 = undefined;
+    const label, const col = f.label(theme, now, &buf);
+    bubble(gfx, theme, face, w.out_r, label, col, w.scale.ui);
 }
 
 /// The file opener's outline: dashed boxes around the name (solid while
@@ -1710,6 +2012,8 @@ pub fn draw(w: *JobWindow, gfx: *Gfx, theme: *const Theme) void {
     w.drawTitle(gfx, theme, chrome);
     if (w.grid_r) |g| {
         w.drawScaledContent(gfx, theme, f, g);
+        const top = w.title_r.y + w.title_r.h;
+        w.drawFileFx(gfx, theme, .{ .x = g.x, .y = top, .w = g.w, .h = @max(g.y + g.h - top, 1) });
     } else {
         drawPane(gfx, theme, f, &w.out, w.out_r, theme.bg, w.colors, w.showCursor(), true, w.scroll_ms != 0);
         w.drawMarks(gfx, theme);
@@ -1717,6 +2021,8 @@ pub fn draw(w: *JobWindow, gfx: *Gfx, theme: *const Theme) void {
         w.drawFooter(gfx, theme);
         w.drawFileMark(gfx, theme);
         w.drawCopyFlash(gfx, theme);
+        w.drawNameFlash(gfx);
+        w.drawFileFx(gfx, theme, w.out_r);
     }
     if (w.kill_menu) killMenu(gfx, chrome, w.skull_r, theme, ui);
 
@@ -1745,27 +2051,30 @@ fn drawFooter(w: *const JobWindow, gfx: *Gfx, theme: *const Theme) void {
     gfx.fill(r, theme.bg.mix(theme.title_bg, 0.35));
     gfx.fill(.{ .x = r.x, .y = r.y, .w = r.w, .h = @max(@round(ui), 1) }, theme.title_bg);
     const f = chipFace(gfx, w.scale) catch return;
-    if (w.branch()) |b| if (w.git_chip_r.w > 0)
-        drawChip(gfx, theme, f, ui, w.git_chip_r, b, w.over_git_chip or w.git_peek_open, .git);
+    if (w.git_chip_r.w > 0) {
+        const b = w.branch();
+        drawChip(gfx, theme, f, ui, w.git_chip_r, b orelse no_git_label, b != null and (w.over_git_chip or w.git_peek_open), .git, b != null);
+    }
     if (w.folderName()) |name| if (w.folder_chip_r.w > 0)
-        drawChip(gfx, theme, f, ui, w.folder_chip_r, name, w.over_folder_chip or w.folder_peek_open, .folder);
+        drawChip(gfx, theme, f, ui, w.folder_chip_r, name, w.over_folder_chip or w.folder_peek_open, .folder, true);
 }
 
 /// A chip: its icon and label (cut with … when long); lighter while the
-/// mouse is on it or its peek is open.
-fn drawChip(gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, ui: f32, cr: Rect, label: []const u8, lit: bool, icon: enum { git, folder }) void {
-    gfx.fill(cr, theme.title_bg.mix(theme.fg, if (lit) 0.16 else 0.06));
+/// mouse is on it or its peek is open; dimmed when disabled.
+fn drawChip(gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, ui: f32, cr: Rect, label: []const u8, lit: bool, icon: enum { git, folder }, enabled: bool) void {
+    gfx.fill(cr, theme.title_bg.mix(theme.fg, if (lit) 0.16 else if (enabled) 0.06 else 0.02));
+    const icon_col = if (enabled) theme.focus else theme.dim;
     const pad = @round(7 * ui);
     const iy = cr.y + @round((cr.h - f.cell_h) / 2);
     const iw = @round(f.cell_h * 0.8);
     switch (icon) {
-        .git => gitIcon(gfx, theme.focus, ui, cr.x + pad, iy, iw, f.cell_h),
-        .folder => folderIcon(gfx, theme.focus, ui, cr.x + pad, iy, iw, f.cell_h),
+        .git => gitIcon(gfx, icon_col, ui, cr.x + pad, iy, iw, f.cell_h),
+        .folder => folderIcon(gfx, icon_col, ui, cr.x + pad, iy, iw, f.cell_h),
     }
     const tx = cr.x + pad + chipIconW(f, ui);
     const ty = cr.y + @round((cr.h - f.cell_h) / 2);
     const cut = chipCut(label);
-    const end = gfx.text(f, tx, ty, label[0..cut], theme.title_fg);
+    const end = gfx.text(f, tx, ty, label[0..cut], if (enabled) theme.title_fg else theme.dim);
     if (cut < label.len) _ = gfx.text(f, end, ty, "…", theme.dim);
 }
 
@@ -1854,7 +2163,7 @@ fn drawMarks(w: *const JobWindow, gfx: *Gfx, theme: *const Theme) void {
 /// rows sit in the scrollback, sized by the share of lines in view. Null
 /// while all the output fits.
 fn scrollThumb(w: *const JobWindow) ?struct { y: f32, h: f32 } {
-    const total = w.out.lineCount();
+    const total = w.out.viewEnd();
     if (total <= w.out.rows) return null;
     const r = w.scroller_r;
     const n: f32 = @floatFromInt(total);
@@ -1945,7 +2254,8 @@ fn drawTitle(w: *JobWindow, gfx: *Gfx, theme: *const Theme, chrome: *Gfx.Face) v
 }
 
 fn showCursor(w: *const JobWindow) bool {
-    return w.focused and w.proc.running() and w.out.scroll == 0;
+    return w.focused and w.proc.running() and w.out.scroll == 0 and
+        !w.out.cursor_hidden and w.busy_ms == 0;
 }
 
 /// Red square with a white ×.
@@ -2126,7 +2436,7 @@ fn drawPane(gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, s: *Screen, r: Rect, p
     defer gfx.clip(null);
 
     const rows: usize = s.rows;
-    const total = s.lineCount();
+    const total = s.viewEnd();
     const end = total -| s.scroll;
     const start = end -| rows;
 

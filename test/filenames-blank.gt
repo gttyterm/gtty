@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The file opener with the mouse on a blank inside a name: the name is
+# found from the text right of the blank. Run from a scratch folder:
+#   mkdir -p 'w/My Dir' && cd w && touch 'My File.txt' 'a (1).pdf' plain.txt 'My Dir/Big Plan.md' 'Wide   Gap.txt'
+#   gtty --script $REPO/test/filenames-blank.gt
+# Expect outlines on: Wide   Gap.txt (mouse in its gap), a (1).pdf
+# (mouse on its blank); none past the end of a line.
+/s bash
+/wait 1500
+/type clear
+/wait 500
+/type LC_ALL=C ls -1; echo "saved to a (1).pdf. and My Dir/Big Plan.md"
+/wait 800
+/move 50 102
+/wait 300
+/shot blank-1.bmp
+/move 50 120
+/wait 300
+/shot blank-2.bmp
+/move 200 102
+/wait 300
+/shot blank-3.bmp
+/quit

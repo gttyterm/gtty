@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Files dropped in from another app: a modal asks first (Copy / Cancel,
+# 10 s; no answer = Cancel), then the window shows what happened (FileFx:
+# a white flash and a bubble, "✓ copied … into …" for 1.6 s). Run from an
+# empty scratch folder with a file to drop (DROP=/path/to/file):
+#   sed "s|@DROP@|$DROP|" test/filefx.gt > /tmp/f.gt && gtty --script /tmp/f.gt
+# Expect: one copy of the file (Enter), not a second (Esc, timeout).
+/s bash
+/wait 1500
+# 1. Enter = Copy
+/dropover 300 300
+/drop 300 300 @DROP@
+/wait 300
+/shot filefx-1-ask.bmp
+/key enter
+/pace 100
+/shot filefx-2-copying.bmp
+/wait 300
+/shot filefx-3-copied.bmp
+/pace 400
+/wait 2000
+# 2. Esc = Cancel
+/drop 300 300 @DROP@
+/key escape
+/shot filefx-4-cancelled.bmp
+/wait 2000
+# 3. No answer: cancelled after 10 s
+/drop 300 300 @DROP@
+/wait 6000
+/shot filefx-5-countdown.bmp
+/wait 4500
+/shot filefx-6-timeout.bmp
+/wait 2000
+/type ls
+/wait 500
+/shot filefx-7-ls.bmp
+/quit

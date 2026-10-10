@@ -11,10 +11,17 @@
 //!     the right, and enabled or dimmed; an optional dim title row on top
 //!     that can't be picked. A row can have a ▸ box at its right end
 //!     (`Row.sub`): a click there opens a submenu (App's `sub_menu`, next
-//!     to the row) instead of picking the row.
+//!     to the row) instead of picking the row. A row that only opens a
+//!     submenu (`Row.hover_sub`: the file menu's Open With ▸) opens it
+//!     when the mouse rests on it or clicks it; its ▸ has no box.
+//!   * Separators (`Row.sep`): a thin line between groups of rows.
 //!   * Closes on a click outside (that click does nothing else; a right
 //!     click opens the right-click menu again there), on any key (Esc only
 //!     closes), the wheel, or a resize.
+//!
+//! The right-click menu on an outlined file or folder name (or on a
+//! ⌘-click selection of them) is the file actions menu (`files`): Open,
+//! Rename, Copy, Cut, Paste, Move to Trash, Delete.
 //!
 //! App owns at most one Menu, routes the mouse to it and acts on the row
 //! picked (by its index); what the menu is for is in `purpose`.
@@ -23,6 +30,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const color = @import("../core/color.zig");
 const Theme = color.Theme;
+const c = @import("../c.zig").c;
 const Gfx = @import("../render/Gfx.zig");
 const Rect = Gfx.Rect;
 const ids = @import("ids.zig");
@@ -39,7 +47,16 @@ pub const Row = struct {
     /// A ▸ box at the right end opens a submenu (`sub_on`: it has rows).
     sub: bool = false,
     sub_on: bool = false,
+    /// With `sub`: the whole row opens the submenu (hover or click).
+    hover_sub: bool = false,
+    /// A separator line, not a row: never picked.
+    sep: bool = false,
+    /// A small picture before the label (an app's icon; owned by App).
+    icon: ?*c.SDL_Texture = null,
 };
+
+/// A separator line between groups of rows.
+pub const separator: Row = .{ .label = "", .enabled = false, .sep = true };
 
 /// The right-click menu acts on a job window (by id) or the prompt.
 pub const Target = union(enum) { job: ids.Id, prompt };
@@ -48,7 +65,9 @@ pub const Target = union(enum) { job: ids.Id, prompt };
 pub const Purpose = union(enum) {
     /// The right-click menu: rows `edit_copy`, `edit_paste`.
     edit: Target,
-    /// `show`'s app picker: row i opens the file with App's picker app i.
+    /// `show`'s app picker, or the file menu's Open With ▸ submenu: row
+    /// `codes[i]` = k opens the file with App's picker app k
+    /// (`open_with_other`: the system's choose-an-app dialog).
     open_with,
     /// A menu of the drawn menu bar: row i picks `codes[i]` (a
     /// gtty_menu.h code, as the system menu bar's rows do).
@@ -59,11 +78,18 @@ pub const Purpose = union(enum) {
     /// The right-click menu's History ▸ submenu: row i types `cd` to the
     /// window's folder history entry i.
     folder_history: ids.Id,
+    /// The right-click menu on a file or folder name (window id): the
+    /// file actions (`codes[i]`: App's `file_*` codes; the files are
+    /// App's `menu_files`).
+    files: ids.Id,
 };
 
+/// The app picker's "Other…" row: the system's choose-an-app dialog.
+pub const open_with_other = -1;
+
 /// The drawn menu bar's menus, left to right.
-pub const Bar = enum { gtty, edit };
-pub const bar_titles = [_][]const u8{ "gtty", "Edit" };
+pub const Bar = enum { gtty };
+pub const bar_titles = [_][]const u8{"gtty"};
 
 /// The right-click menu's rows, as `codes[i]` (a row's place depends on
 /// which rows the menu has).
@@ -115,7 +141,8 @@ codes: [max_rows]i32 = undefined,
 /// takes a paste). `output`: a row under Copy with this label (job
 /// windows: "Copy last output" / "Copy all output"). `folders`: a History ▸
 /// row (job windows), enabled when the window has a folder history. Each
-/// row's `codes[i]` says which it is (`edit_copy`, …).
+/// row's `codes[i]` says which it is (`edit_copy`, …). Paste pastes what
+/// was copied last: text, or files on gtty's file clipboard (App decides).
 pub fn edit(target: Target, at: [2]f32, copy_ok: bool, output: ?[]const u8, paste_ok: bool, history_ok: bool, folders: ?bool) Menu {
     var m: Menu = .{ .purpose = .{ .edit = target }, .at = at };
     m.addCode(.{ .label = "Copy", .key = edit_keys[0], .enabled = copy_ok }, edit_copy);
@@ -127,7 +154,7 @@ pub fn edit(target: Target, at: [2]f32, copy_ok: bool, output: ?[]const u8, past
 }
 
 /// Add a row with its code.
-fn addCode(m: *Menu, row: Row, code: i32) void {
+pub fn addCode(m: *Menu, row: Row, code: i32) void {
     const n = m.n;
     m.add(row);
     if (m.n > n) m.codes[n] = code;
@@ -174,22 +201,56 @@ pub fn layout(m: *Menu, f: *const Gfx.Face, ui: f32, bounds: Rect) void {
     var any_sub = false;
     for (m.rows[0..m.n]) |row| any_sub = any_sub or row.sub;
     const aw: f32 = if (any_sub) arrowWidth(f, ui) else 0;
-    const w = 2 * e + pad(ui) + lw + gap + sw + pad(ui) + aw;
+    const iw = m.iconColumn(f, ui);
+    const w = 2 * e + pad(ui) + iw + lw + gap + sw + pad(ui) + aw;
     const title_h: f32 = if (m.title.len > 0) row_h else 0;
-    const h = 2 * e + title_h + row_h * @as(f32, @floatFromInt(m.n));
+    const sep_h = sepHeight(ui);
+    var rows_h: f32 = 0;
+    for (m.rows[0..m.n]) |row| rows_h += if (row.sep) sep_h else row_h;
+    const h = 2 * e + title_h + rows_h;
     var x = m.at[0];
     var y = m.at[1];
     if (x + w > bounds.x + bounds.w) x = @max(bounds.x, x - w);
     if (y + h > bounds.y + bounds.h) y = @max(bounds.y, y - h);
     m.r = .{ .x = x, .y = y, .w = w, .h = h };
     m.title_r = .{ .x = x + e, .y = y + e, .w = w - 2 * e, .h = title_h };
-    for (m.row_r[0..m.n], 0..) |*row, i| row.* = .{
-        .x = x + e,
-        .y = y + e + title_h + row_h * @as(f32, @floatFromInt(i)),
-        .w = w - 2 * e - aw,
-        .h = row_h,
-    };
+    var ry = y + e + title_h;
+    for (m.row_r[0..m.n], m.rows[0..m.n]) |*rr, row| {
+        const rh = if (row.sep) sep_h else row_h;
+        rr.* = .{ .x = x + e, .y = ry, .w = w - 2 * e - aw, .h = rh };
+        ry += rh;
+    }
     for (m.arrow_r[0..m.n], m.row_r[0..m.n]) |*a, row| a.* = .{ .x = row.x + row.w, .y = row.y, .w = aw, .h = row.h };
+    // A row that only opens a submenu takes its ▸ too.
+    for (m.row_r[0..m.n], m.rows[0..m.n]) |*rr, row| if (row.hover_sub) {
+        rr.w += aw;
+    };
+}
+
+/// A submenu next to `parent`'s row `row`: on the parent's right, else on
+/// its left (not over it), kept on screen.
+pub fn layoutBeside(m: *Menu, f: *const Gfx.Face, ui: f32, bounds: Rect, parent: *const Menu, row: usize) void {
+    m.at = .{ parent.r.x + parent.r.w, parent.row_r[row].y - edge(ui) };
+    m.layout(f, ui, bounds);
+    if (m.r.x < parent.r.x + parent.r.w and parent.r.x - m.r.w >= bounds.x) {
+        m.at[0] = parent.r.x - m.r.w;
+        m.layout(f, ui, bounds);
+    }
+}
+
+/// An icon's size in pixels for face `f` (App draws them this size).
+pub fn iconPx(f: *const Gfx.Face) u32 {
+    return @intFromFloat(@round(f.cell_h * 1.15));
+}
+
+/// Room for icons before the labels: all rows line up when any has one.
+fn iconColumn(m: *const Menu, f: *const Gfx.Face, ui: f32) f32 {
+    for (m.rows[0..m.n]) |row| if (row.icon != null) return @as(f32, @floatFromInt(iconPx(f))) + @round(pad(ui) * 0.6);
+    return 0;
+}
+
+fn sepHeight(ui: f32) f32 {
+    return @round(9 * ui);
 }
 
 fn arrowWidth(f: *const Gfx.Face, ui: f32) f32 {
@@ -198,7 +259,7 @@ fn arrowWidth(f: *const Gfx.Face, ui: f32) f32 {
 
 /// The row whose ▸ box is under (x, y).
 pub fn arrowAt(m: *const Menu, x: f32, y: f32) ?usize {
-    for (m.rows[0..m.n], m.arrow_r[0..m.n], 0..) |row, a, i| if (row.sub and a.contains(x, y)) return i;
+    for (m.rows[0..m.n], m.arrow_r[0..m.n], 0..) |row, a, i| if (row.sub and !row.hover_sub and a.contains(x, y)) return i;
     return null;
 }
 
@@ -206,14 +267,15 @@ pub fn contains(m: *const Menu, x: f32, y: f32) bool {
     return m.r.contains(x, y);
 }
 
-/// The row under (x, y), enabled or not (not on its ▸ box).
+/// The row under (x, y), enabled or not (not on its ▸ box, not a
+/// separator).
 pub fn rowAt(m: *const Menu, x: f32, y: f32) ?usize {
-    for (m.row_r[0..m.n], 0..) |row, i| if (row.contains(x, y)) return i;
+    for (m.row_r[0..m.n], m.rows[0..m.n], 0..) |rr, row, i| if (!row.sep and rr.contains(x, y)) return i;
     return null;
 }
 
 pub fn isEnabled(m: *const Menu, i: usize) bool {
-    return i < m.n and m.rows[i].enabled;
+    return i < m.n and m.rows[i].enabled and !m.rows[i].sep;
 }
 
 /// Mouse moved: highlight the enabled row under it. True when that changed.
@@ -234,23 +296,38 @@ pub fn draw(m: *const Menu, gfx: *Gfx, theme: *const Theme, f: *Gfx.Face, ui: f3
     gfx.fill(m.r, theme.title_bg);
     gfx.outline(m.r, theme.divider, @max(@round(ui), 1));
     const p = pad(ui);
+    const iw = m.iconColumn(f, ui);
     if (m.title.len > 0) {
         const ty = m.title_r.y + @round((m.title_r.h - f.cell_h) / 2);
         _ = gfx.text(f, m.title_r.x + p, ty, m.title, theme.dim);
     }
     for (m.rows[0..m.n], m.row_r[0..m.n], m.arrow_r[0..m.n], 0..) |row, rr, ar, i| {
-        if (row.sub) {
+        if (row.sep) {
+            const lw = @max(@round(ui), 1);
+            gfx.fill(.{ .x = rr.x + p, .y = rr.y + @round((rr.h - lw) / 2), .w = rr.w - 2 * p, .h = lw }, theme.divider);
+            continue;
+        }
+        if (m.over == i and !m.over_arrow) gfx.fill(rr, theme.focus.mix(theme.title_bg, 0.55));
+        if (row.hover_sub) {
+            const ac = if (row.sub_on and row.enabled) theme.title_fg else theme.title_fg.mix(theme.title_bg, 0.6);
+            _ = gfx.text(f, ar.x + @round((ar.w - f.cell_w) / 2), ar.y + @round((ar.h - f.cell_h) / 2), "▶", ac);
+        } else if (row.sub) {
             if (m.over == i and m.over_arrow) gfx.fill(ar, theme.focus.mix(theme.title_bg, 0.55));
             gfx.fill(.{ .x = ar.x, .y = ar.y + @round(ar.h * 0.2), .w = @max(@round(ui), 1), .h = @round(ar.h * 0.6) }, theme.divider);
             const ac = if (row.sub_on) theme.title_fg else theme.title_fg.mix(theme.title_bg, 0.6);
             _ = gfx.text(f, ar.x + @round((ar.w - f.cell_w) / 2), ar.y + @round((ar.h - f.cell_h) / 2), "▶", ac);
         }
-        if (m.over == i and !m.over_arrow) gfx.fill(rr, theme.focus.mix(theme.title_bg, 0.55));
         const ty = rr.y + @round((rr.h - f.cell_h) / 2);
         const fg = if (row.enabled) theme.title_fg else theme.title_fg.mix(theme.title_bg, 0.6);
         const kc = if (row.enabled) theme.dim else theme.dim.mix(theme.title_bg, 0.6);
-        _ = gfx.text(f, rr.x + p, ty, row.label, fg);
-        if (row.key.len > 0) _ = gfx.text(f, rr.x + rr.w - p - Gfx.textWidth(f, row.key), ty, row.key, kc);
+        if (row.icon) |tex| {
+            const s: f32 = @floatFromInt(iconPx(f));
+            gfx.image(tex, .{ .x = rr.x + p, .y = rr.y + @round((rr.h - s) / 2), .w = s, .h = s });
+        }
+        _ = gfx.text(f, rr.x + p + iw, ty, row.label, fg);
+        // A whole-row submenu's ▸ sits at the row's end: the key before it.
+        const kr = if (row.hover_sub) rr.x + rr.w - ar.w else rr.x + rr.w;
+        if (row.key.len > 0) _ = gfx.text(f, kr - p - Gfx.textWidth(f, row.key), ty, row.key, kc);
     }
 }
 
@@ -382,4 +459,33 @@ test "the right-click menu of a job window: Copy last output under Copy" {
     try std.testing.expectEqual(@as(i32, edit_paste), m.codes[2]);
     try std.testing.expectEqual(@as(i32, edit_folders), m.codes[3]);
     try std.testing.expectEqual(@as(i32, edit_new_shell), m.codes[4]);
+}
+
+test "separators take no clicks; a whole-row submenu takes its ▸" {
+    var f: Gfx.Face = undefined;
+    f.cell_w = 8;
+    f.cell_h = 16;
+    var m: Menu = .{ .purpose = .open_with, .at = .{ 10, 10 } };
+    m.add(.{ .label = "Open" });
+    m.add(.{ .label = "Open With", .sub = true, .sub_on = true, .hover_sub = true });
+    m.add(separator);
+    m.add(.{ .label = "Other…" });
+    m.layout(&f, 1, .{ .x = 0, .y = 0, .w = 800, .h = 600 });
+    try std.testing.expect(m.row_r[2].h < m.row_r[1].h);
+    try std.testing.expect(m.rowAt(m.row_r[2].x + 1, m.row_r[2].y + 1) == null);
+    try std.testing.expect(!m.isEnabled(2));
+    try std.testing.expectEqual(m.row_r[2].y + m.row_r[2].h, m.row_r[3].y);
+    const a = m.arrow_r[1];
+    try std.testing.expect(m.arrowAt(a.x + 1, a.y + 1) == null);
+    try std.testing.expectEqual(@as(usize, 1), m.rowAt(a.x + 1, a.y + 1).?);
+    var sub: Menu = .{ .purpose = .open_with, .at = .{ 0, 0 } };
+    sub.add(.{ .label = "TextEdit" });
+    sub.layoutBeside(&f, 1, .{ .x = 0, .y = 0, .w = 800, .h = 600 }, &m, 1);
+    try std.testing.expect(sub.r.x >= m.r.x + m.r.w);
+    // No room on the right: on the left, not over the menu.
+    var right = m;
+    right.at = .{ 790, 10 };
+    right.layout(&f, 1, .{ .x = 0, .y = 0, .w = 800, .h = 600 });
+    sub.layoutBeside(&f, 1, .{ .x = 0, .y = 0, .w = 800, .h = 600 }, &right, 1);
+    try std.testing.expect(sub.r.x + sub.r.w <= right.r.x);
 }

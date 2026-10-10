@@ -19,8 +19,15 @@
 //!   * `a/` and `b/` of `git diff` headers (tried without them too);
 //!   * Windows separators: `src\main.c` is also tried as `src/main.c`
 //!     (a drive letter `C:\…` can't exist here, it is tried as is).
+//!
+//! Names with blanks or punctuation in them (`My File.txt`, `a (1).pdf`)
+//! can't be told from the text alone: `longestKnown` tries the spans
+//! around the column that start and end at word edges and keeps the
+//! longest one the caller knows (FileOpener asks the folder listings,
+//! DirCache).
 
 const std = @import("std");
+const wcwidth = @import("../core/wcwidth.zig");
 
 pub const max_path = 1024;
 
@@ -104,6 +111,119 @@ pub fn candidates(line: []const u21, col: usize) List {
     }
     addVariants(&out, line, start, end, true);
     return out;
+}
+
+/// Most word edges looked at on each side of the column (long titles
+/// have many words), and the most characters a name with blanks can have.
+const max_edges = 40;
+const max_span = 255;
+
+/// Ends a word: a blank, a delimiter, or end-of-sentence punctuation.
+fn isEdgeChar(cp: u21) bool {
+    return isDelim(cp) or switch (cp) {
+        '.', ':', '!', '?' => true,
+        else => false,
+    };
+}
+
+/// A character `isSpecial` names have: one that splits the plain run.
+pub fn isSpecial(cp: u21) bool {
+    return isDelim(cp) and cp != 0;
+}
+
+/// A name the plain run can't find: it has a blank or a delimiter in it,
+/// or ends with punctuation the run drops.
+pub fn specialName(name: []const u8) bool {
+    var it = (std.unicode.Utf8View.init(name) catch return false).iterator();
+    while (it.nextCodepoint()) |cp| if (isSpecial(cp)) return true;
+    return name.len > 0 and switch (name[name.len - 1]) {
+        '.', ',', ':', ';', '!', '?' => true,
+        else => false,
+    };
+}
+
+/// Names with blanks or punctuation: of the spans around `col` that
+/// start after a blank / delimiter (or the line's start) and end before
+/// one (or end-of-sentence punctuation, or the line's end), the longest
+/// with a blank or delimiter inside it that `known(ctx, text)` accepts.
+/// The text is the span as written (`\ ` → blank).
+/// On a blank (`My   File.txt`, the mouse between the words): a name
+/// must go on to the right of it, so the line has to have more text
+/// there (a line's trailing blanks are cut: past them is its end); the
+/// spans then start left of the blank and end right of it.
+/// A wide character (`？`, CJK, emoji) is followed by a spacer cell (0)
+/// on the screen: the spans are looked for without them, and the columns
+/// given back cover both cells.
+pub fn longestKnown(line: []const u21, col: usize, ctx: anytype, comptime known: fn (@TypeOf(ctx), []const u8) bool) ?Candidate {
+    if (col >= line.len) return null;
+    var buf: [4096]u21 = undefined;
+    var at: [4097]u32 = undefined; // line column of each character, + the end
+    var n: usize = 0;
+    var ccol: usize = 0;
+    var i: usize = 0;
+    while (i < line.len and n < buf.len) : (n += 1) {
+        if (i <= col) ccol = n;
+        buf[n] = line[i];
+        at[n] = @intCast(i);
+        i += 1;
+        if (line[i - 1] != 0 and wcwidth.width(line[i - 1]) == 2 and i < line.len and line[i] == 0) i += 1;
+    }
+    at[n] = @intCast(i);
+    if (ccol >= n) return null;
+    var c = longestKnownIn(buf[0..n], ccol, ctx, known) orelse return null;
+    c.start = at[c.start];
+    c.end = at[c.end];
+    return c;
+}
+
+fn longestKnownIn(line: []const u21, col: usize, ctx: anytype, comptime known: fn (@TypeOf(ctx), []const u8) bool) ?Candidate {
+    if (col >= line.len) return null;
+    if (isBlank(line[col])) {
+        const right = for (line[col + 1 ..]) |cp| {
+            if (!isBlank(cp)) break true;
+        } else false;
+        const left = for (line[0..col]) |cp| {
+            if (!isBlank(cp)) break true;
+        } else false;
+        if (!right or !left) return null;
+    }
+    var starts: [max_edges]usize = undefined;
+    var ns: usize = 0;
+    var s = col + 1;
+    while (s > 0 and ns < max_edges and col + 1 - s < max_span) {
+        s -= 1;
+        if (isBlank(line[s])) continue;
+        if (s == 0 or isDelim(line[s - 1])) {
+            starts[ns] = s;
+            ns += 1;
+        }
+    }
+    var ends: [max_edges]usize = undefined;
+    var ne: usize = 0;
+    var e = col + 1;
+    while (e <= line.len and ne < max_edges and e - col < max_span) : (e += 1) {
+        if (isBlank(line[e - 1])) continue;
+        if (e == line.len or isDelim(line[e]) or (isEdgeChar(line[e]) and (e + 1 == line.len or isDelim(line[e + 1])))) {
+            ends[ne] = e;
+            ne += 1;
+        }
+    }
+    var best: ?Candidate = null;
+    for (starts[0..ns]) |a| for (ends[0..ne]) |b| {
+        if (b - a > max_span) continue;
+        if (best) |bc| if (b - a <= bc.end - bc.start) continue;
+        const span = line[a..b];
+        const inner = for (span) |cp| {
+            if (isSpecial(cp)) break true;
+        } else false;
+        // No blank / delimiter inside: only a name ending in punctuation
+        // the plain run drops ("notes.").
+        if (!inner and !isEdgeChar(span[span.len - 1])) continue;
+        var c: Candidate = .{ .start = @intCast(a), .end = @intCast(b) };
+        if (!encode(&c, span, false)) continue;
+        if (known(ctx, c.text())) best = c;
+    };
+    return best;
 }
 
 /// The inside of the nearest quotes around `col` on this line.
@@ -246,6 +366,81 @@ fn first(comptime s: []const u8, col: usize) []const u8 {
     const line = lineOf(s);
     S.l = candidates(&line, col);
     return if (S.l.n > 0) S.l.items[0].text() else "";
+}
+
+fn knownIn(names: []const []const u8, text: []const u8) bool {
+    for (names) |n| if (std.mem.eql(u8, n, text)) return true;
+    return false;
+}
+
+fn longest(comptime s: []const u8, col: usize, names: []const []const u8) []const u8 {
+    const S = struct {
+        var c: ?Candidate = null;
+    };
+    const line = lineOf(s);
+    S.c = longestKnown(&line, col, names, knownIn);
+    return if (S.c) |*c| c.text() else "";
+}
+
+test "names with blanks, from a listing" {
+    const t = std.testing;
+    const names: []const []const u8 = &.{ "My File.txt", "a (1).pdf", "Screen Shot 1.png", "My", "notes.", "src/Big Plan.md" };
+    const names2: []const []const u8 = &.{"My   File.txt"};
+    try t.expectEqualStrings("My File.txt", longest("My File.txt  other.txt", 0, names));
+    try t.expectEqualStrings("My File.txt", longest("My File.txt  other.txt", 5, names));
+    try t.expectEqualStrings("", longest("My File.txt  other.txt", 15, names)); // plain: the run finds it
+    try t.expectEqualStrings("My File.txt", longest("-rw-r--r--  1 me  staff  0 Oct  7 12:00 My File.txt", 45, names));
+    try t.expectEqualStrings("a (1).pdf", longest("saved to a (1).pdf.", 12, names));
+    try t.expectEqualStrings("Screen Shot 1.png", longest("x 'Screen Shot 1.png' y", 10, names));
+    try t.expectEqualStrings("src/Big Plan.md", longest("open src/Big Plan.md now", 14, names));
+    try t.expectEqualStrings("", longest("My Other.txt", 1, names)); // "My" alone has no blank
+    try t.expectEqualStrings("notes.", longest("cat notes. done", 6, names));
+    // On a blank inside the name: found from the text to its right.
+    try t.expectEqualStrings("My File.txt", longest("My File.txt", 2, names));
+    try t.expectEqualStrings("My   File.txt", longest("x My   File.txt  y", 5, names2));
+    try t.expectEqualStrings("My   File.txt", longest("-rw-r--r--  1 me  staff  0 Oct  7 12:00 My   File.txt", 42, names2));
+    try t.expectEqualStrings("a (1).pdf", longest("saved to a (1).pdf.", 10, names));
+    // A blank between names, or after the last one: nothing.
+    try t.expectEqualStrings("", longest("My File.txt   other.txt", 12, names));
+    try t.expectEqualStrings("", longest("My File.txt   ", 12, names));
+    try t.expectEqualStrings("", longest("   My File.txt", 1, names));
+}
+
+test "a long name with a wide character" {
+    const t = std.testing;
+    const name = "Widowmaker X D.Va - Can You Help Me with this Stuck Butt Plug？ [27013].mp4";
+    const names: []const []const u8 = &.{name};
+    // As on the screen: a spacer cell (0) after the full-width ？.
+    const shown = comptime blk: {
+        const l = lineOf("-rw-r--r--  1 me  staff  0 Oct  8 12:00 " ++ name);
+        var out: [l.len + 1]u21 = undefined;
+        var j: usize = 0;
+        for (l) |cp| {
+            out[j] = cp;
+            j += 1;
+            if (cp == 0xFF1F) {
+                out[j] = 0;
+                j += 1;
+            }
+        }
+        break :blk out;
+    };
+    const start = 40;
+    for ([_]usize{ start, start + 3, start + 11, start + 60, start + 61, start + 62, shown.len - 1 }) |col| {
+        const c = longestKnown(&shown, col, names, knownIn) orelse return error.NotFound;
+        try t.expectEqualStrings(name, c.text());
+        try t.expectEqual(@as(u32, start), c.start);
+        try t.expectEqual(@as(u32, shown.len), c.end);
+    }
+}
+
+test "special names" {
+    const t = std.testing;
+    try t.expect(specialName("My File.txt"));
+    try t.expect(specialName("a(1).pdf"));
+    try t.expect(specialName("notes."));
+    try t.expect(!specialName("README.md"));
+    try t.expect(!specialName("src-main_2.c"));
 }
 
 test "file names around a column" {

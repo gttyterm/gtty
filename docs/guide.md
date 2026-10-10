@@ -38,10 +38,10 @@ In the picture above:
 
 ## Chips: git branch and folder
 
-The strip along the bottom of a window holds its **chips**. A window
-whose program runs inside a git repository shows the **branch** first. It follows the folder the program is
-in, so after `cd` in a shell it shows that folder's branch (and disappears
-outside a repository).
+The strip along the bottom of a window holds its **chips**: the **folder**
+first, then the **branch**. The branch chip follows the folder the program
+is in, so after `cd` in a shell it shows that folder's branch; outside a git
+repository it stays there, dimmed, and does nothing.
 
 - **Hover** the chip (or click it): a box with the full branch name, a
   **copy** button and an **expand** button (^).
@@ -55,15 +55,17 @@ outside a repository).
 
 Your shell's own prompt shows the new branch after your next Enter.
 
-Next to it, the **folder chip** shows the name of the folder the window's
-program is in (not in an ssh session).
+The **folder chip** shows the name of the folder the window's program is
+in (not in an ssh session).
 
-- **Hover** it: the full path and a **copy** button.
-- **Click** it: the folders above this one, `/` on top and the parent
-  folder at the bottom, already chosen. Type to filter, ↑/↓ to choose,
-  **Enter** (or a click) `cd`s the shell there. This works while the shell
-  waits for your input; while a command runs, the box says the shell is
-  busy.
+- **Hover** or **click** it: the full path. A click on the path (or the
+  **copy** button) copies it.
+- Move onto the **expand** button (^), or click it: the folders
+  above this one, `/` on top and the current folder at the bottom (marked
+  green), with the parent folder above it already chosen. Type to filter,
+  ↑/↓ to choose, **Enter** (or a click) `cd`s the shell there. This works
+  while the shell waits for your input; while a command runs, the box says
+  the shell is busy.
 
 Every window has a number (`#4`) so you can tell them apart. Click any window
 in either grid to bring it into the middle; the one that was there moves to
@@ -208,13 +210,33 @@ Linux gtty shows a thin menu bar at the top of its window:
   Ctrl+Shift+N: another gtty), **New Shell** (⌘T; Linux Ctrl+Shift+T:
   your shell in the current window's folder) and **Run
   command** (back to the prompt, ready to type).
-- **Edit** → **Copy**, **Paste**, **Select All** (⌘C ⌘V ⌘A on macOS).
+
+Copy, paste and select all are keys, not menu rows (with several job
+windows a menu's Copy didn't say which one): ⌘C, ⌘V, ⌘A (Linux
+Ctrl+Shift+C, V, A).
 
 **Settings…** opens the settings window: text size, scrollback, the
 start-up command, file names (mark on hover, double-click opens), the left-edge marks, colors (text, background and the 16 terminal colors),
 and delay times. Changes take effect at once and are saved in
 `~/.config/gtty/config` (`$XDG_CONFIG_HOME/gtty/config`). Options on the
 command line and `GTTY_*` variables still win for that run.
+
+### Folders and links in the output
+
+When a command's output has no colors of its own (plain `ls`, `find`,
+`pwd`…), gtty colors the names in it that are folders in the window's
+folder: **folders blue** (the color of a focused window's border), and
+**symbolic links** with a dash of pink: a link to a file in the normal
+text color tinted pink, a link to a folder in the blue tinted pink.
+Output with its own colors (`ls -G`, `ls --color`) is left as it is.
+Turn it off (and on) in Settings… → General → "Folder names in blue
+(output without colors)".
+
+**Hover a link** for a moment: a small box above it shows where it
+points (→ the real path). It stays a moment after the mouse leaves the
+name, so you can move onto it; **click the box** to `cd` there: into
+the folder a link to a folder points to, or to the folder a linked file
+is in (the shell must be waiting at its prompt).
 
 ### Opening files from the output
 
@@ -227,7 +249,9 @@ Finder, a mail, an editor — as if you dragged it from the file manager
 (Linux: under Wayland; X11 has no drag and drop in gtty). A quick press and drag still selects text.
 Names with `:12:3` after them (compiler messages, `grep -n`), in quotes,
 `file://` URLs, `a/` / `b/` from `git diff`, and Windows-style `src\x.c`
-work too. A folder name in a shell window (zsh / bash, waiting for your
+work too, and so do names with spaces or brackets as `ls` prints them
+(`My File.txt`, `report (1).pdf`, `docs/Big Plan.md`): gtty looks them up
+in the folder's list of files. A folder name in a shell window (zsh / bash, waiting for your
 input): a double-click `cd`s the shell there. Programs and scripts are never
 opened this way.
 
@@ -247,14 +271,83 @@ While the mouse is on a marked name, a short hint at the bottom of gtty's
 window says what the mouse does with it. Turn it off (and on) in
 Settings… → General → "File names: mark on hover, double-click opens".
 
+### Working with files
+
+**Right-click** an outlined file or folder name for what you can do with
+it: **Open with <app>** / **Open With…** (a folder: **cd <its name>**,
+**Open in Finder**, on Linux **Open in Files**), **Rename…**, **Copy**,
+**Copy Name**, **Cut**, **Paste**, **Move to Trash** (where the system has
+a trash) and **Delete…**.
+
+**A single click** on an outlined name copies its name as text (the name
+flashes), ready to paste into a command line; **Copy Name** in the menu
+does the same.
+
+Opening a file takes one row. When the file has a default app, the row
+is **Open with <that app>**, with the app's icon: click it to open the
+file. Its **▸** (rest the mouse on it, or click it) lists the other apps
+that can open the file, then **Other…**. When the file has no default
+app, the row is **Open With…**. **Open With…** and **Other…** open the
+system's own "choose an application" dialog (macOS: as Finder's,
+with Recommended / All Applications and Always Open With; Linux: GNOME's
+or KDE's, through the desktop portal). Shift + double-click and `show
+-a` list the apps over the prompt.
+
+The same with keys, while the mouse is on the name (move the mouse onto
+it after typing: keys you type with the pointer just resting on a name
+still go to the shell):
+
+| | macOS | Linux |
+|---|---|---|
+| Rename | F2 | F2 |
+| Copy / Cut | ⌘C / ⌘X | Ctrl+Shift+C / X |
+| Paste (over a folder name, or anywhere in a window: its folder) | ⌘V | Ctrl+Shift+V |
+| Move to Trash | ⌘⌫ | Ctrl+Delete |
+| Delete | ⌫ or Delete | Delete or Backspace |
+
+**Several at once:** ⌘-click (Linux: Ctrl-click) names to select them
+(a box marks each; ⌘-click again to take one out, a plain click clears),
+then use a key or right-click one of them.
+
+Copied or cut files wait on gtty's own file clipboard (not the system's).
+**Paste pastes what you copied last:** after copying files, every Paste
+(⌘V, or **Paste** in any right-click menu) copies or moves them into the
+folder (the folder name under the mouse, else the folder the window's
+shell is in); after copying text (a name, a selection, or in another
+app), Paste types the text.
+
+**Rename** opens a small field over the name with the name selected up
+to its extension: type the new name (arrows, words with ⌥, Shift to
+select, Backspace…), **Enter** renames, **Esc** leaves it. **Paste** and
+**Delete** ask first (Enter: yes, Esc: no); with no answer in 10 seconds
+nothing happens. A pasted name that's already there gets a number, so
+nothing is overwritten; Delete removes for good (Move to Trash doesn't).
+After a paste, delete, rename, trash or drop, the shell runs your last
+`ls` (with its options, e.g. `ls -l`; plain `ls` if there was none) again
+so the listing shows the change, if it is waiting at its prompt with
+nothing typed. The same after a `cd` gtty types for you (a link's box,
+the folder chip, History ▸, double-clicking a folder): the new folder is
+listed. Turn it off in Settings… → General → "Run ls again after
+a file action in gtty".
+Copy, Cut and Move to Trash flash the names they took; Paste, Delete and
+Rename show their result on the window for a moment. A cancelled action
+only says so in the status bar.
+
 ### Dropping files on gtty
 
 Drag files from another app (Finder, the file manager, a mail) onto a job
 window: they are **copied** into the folder that window's shell is in. Over a
 folder name in the window's output, that name gets a box: drop there to
 copy into that folder. A name that's already there gets a number (`notes 2.txt`), so
-nothing is overwritten; the status bar says where a drop would go and when
-the copy is done. Not into ssh sessions yet. On Linux this needs Wayland.
+nothing is overwritten; the status bar says where a drop would go.
+
+Before anything is copied, gtty asks: **Copy into X?** with the files and
+the folder. Enter or **Copy** copies; Esc or **Cancel** doesn't. The
+question waits 10 seconds (the countdown is in its corner and along its
+bottom); with no answer, nothing is copied. The window then shows what
+happened in a bubble, as the title-bar copy does: "copying…", then
+"✓ copied notes.txt into src" (or why it failed) for a moment. Not into
+ssh sessions yet. On Linux this needs Wayland.
 
 ### The files of a window's folder
 

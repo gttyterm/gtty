@@ -84,6 +84,12 @@ pub fn read(p: *Process, which: Stream, buf: []u8) ?[]u8 {
     return buf[0..@intCast(n)];
 }
 
+/// Wait up to `ms` for more output (or the end): true when there is some.
+pub fn waitOutput(p: *Process, ms: c_int) bool {
+    if (!p.out_open) return false;
+    return c.gtty_wait_readable(p.out_fd, ms) == 1;
+}
+
 /// Send bytes to the child's stdin.
 pub fn write(p: *Process, bytes: []const u8) void {
     if (!p.out_open) return;

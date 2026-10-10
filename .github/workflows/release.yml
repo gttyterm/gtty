@@ -1,12 +1,20 @@
 # SPDX-FileCopyrightText: 2026 Sagi Forbes Nagar
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Release: a tag v<version> (the version in build.zig.zon) builds the
-# self-contained binaries, signs + notarizes the macOS dmg
-# (scripts/sign-macos.sh, secrets of the environment "release"), makes the
+# Release: pushing a tag v<version> (the version in build.zig.zon) builds
+# the self-contained binaries, signs + notarizes the macOS dmg
+# (scripts/sign-macos.sh, secrets of the channel's environment), makes the
 # .deb / .rpm / .tar.gz and publishes them as a GitHub release.
 #
-#   git tag v0.0.6 && git push origin v0.0.6
+# Two channels, from the tag's MINOR number:
+#   odd  (v1.9.2)  edge:   environment "edge", a pre-release, not latest;
+#   even (v1.10.0) stable: environment "release", a normal release, latest.
+# A stable x.y.0 must be tagged on a commit that already has an edge tag
+# (promote a tested edge build, no merge):
+#
+#   git tag -a v1.10.0 v1.9.2 -m v1.10.0 && git push origin v1.10.0
+#
+# Stable fixes (x.y.N, N > 0) may come from a release/X.Y branch.
 #
 # Run by hand (Actions → Release → Run workflow): the same build, signed
 # and notarized, kept as a workflow artifact only; no release, no tag.
@@ -18,7 +26,7 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ['v*.*.*']
   workflow_dispatch:
 
 # Nothing by default; the job asks for exactly what it needs.
@@ -29,12 +37,67 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Which channel the tag is for: edge (odd minor) or stable (even minor).
+  channel:
+    name: Channel
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      env: ${{ steps.channel.outputs.env }}
+      prerelease: ${{ steps.channel.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # the tags, for the stable guard
+          persist-credentials: false
+
+      - name: Channel from the tag
+        id: channel
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Run by hand on a branch: a build only (no release), with the
+          # stable environment's secrets, as before.
+          if [ "$GITHUB_EVENT_NAME" != push ]; then
+            echo "env=release" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! [[ "$TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::tag $TAG isn't v<major>.<minor>.<patch> (digits only)"
+            exit 1
+          fi
+          minor=${BASH_REMATCH[2]}
+          patch=${BASH_REMATCH[3]}
+          if (( 10#$minor % 2 == 1 )); then
+            echo "$TAG: edge (odd minor), pre-release"
+            echo "env=edge" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$TAG: stable (even minor)"
+          echo "env=release" >> "$GITHUB_OUTPUT"
+          echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          # A new stable line (x.y.0) promotes a tested edge build: the
+          # same commit must carry an edge tag. Fixes (x.y.N, N > 0) may
+          # come from a release/X.Y branch: no check.
+          if (( 10#$patch == 0 )); then
+            edge=$(git tag --points-at "$GITHUB_SHA" | grep -E '^v[0-9]+\.[0-9]*[13579]\.[0-9]+$' || true)
+            if [ -z "$edge" ]; then
+              echo "::error::stable tag $TAG must be on a commit that already has an edge tag (odd minor); tags here: $(git tag --points-at "$GITHUB_SHA" | tr '\n' ' ')"
+              exit 1
+            fi
+            echo "promotes edge: $edge"
+          fi
+
   release:
     name: Build, sign, notarize, publish
+    needs: channel
     runs-on: macos-15
-    environment: release
+    environment: ${{ needs.channel.outputs.env }}
     permissions:
-      contents: write # create the release and upload its files
+      contents: write # create the release and upload the packages
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
@@ -50,11 +113,13 @@ jobs:
 
       - name: Version
         id: version
+        env:
+          TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
         run: |
           v=$(sed -n 's/^ *\.version = "\(.*\)",/\1/p' build.zig.zon | head -1)
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$v" ]; then
-            echo "::error::tag $GITHUB_REF_NAME doesn't match build.zig.zon's version $v (expected v$v)"
+          if [ -n "$TAG" ] && [ "$TAG" != "v$v" ]; then
+            echo "::error::tag $TAG doesn't match build.zig.zon's version $v (expected v$v)"
             exit 1
           fi
 
@@ -97,14 +162,29 @@ jobs:
             dist/gtty_${{ steps.version.outputs.version }}_*
           if-no-files-found: error
 
+      # Edge: a pre-release, never latest. Stable: a normal release, latest.
+      # A release made by hand for this tag already: its notes stay, the
+      # channel's flags are set and the files uploaded (replacing any).
       - name: Publish the release
-        if: github.ref_type == 'tag'
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.channel.outputs.prerelease }}
         run: |
           v=${{ steps.version.outputs.version }}
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --title "gtty $v" --generate-notes --verify-tag \
-            "dist/gtty-$v-macos.dmg" "dist/gtty_${v}_amd64.deb" \
-            "dist/gtty-$v-1.x86_64.rpm" "dist/gtty-$v-linux-x86_64.tar.gz" \
-            "dist/gtty-$v-SHA256SUMS.txt"
+          files=("dist/gtty-$v-macos.dmg" "dist/gtty_${v}_amd64.deb"
+            "dist/gtty-$v-1.x86_64.rpm" "dist/gtty-$v-linux-x86_64.tar.gz"
+            "dist/gtty-$v-SHA256SUMS.txt")
+          if [ "$PRERELEASE" = true ]; then
+            flags=(--prerelease --latest=false)
+          else
+            flags=(--prerelease=false --latest)
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" "${flags[@]}"
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "$TAG" --generate-notes "${flags[@]}" "${files[@]}"
+          fi

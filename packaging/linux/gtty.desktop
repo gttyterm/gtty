@@ -2,7 +2,7 @@
 Type=Application
 Name=gtty
 GenericName=Terminal
-Comment=A graphical terminal: every command in its own window
+Comment=True Graphic Virtual Terminal: many terminal windows on one screen
 Exec=gtty
 Icon=gtty
 Terminal=false
@@ -10,3 +10,9 @@ Categories=System;TerminalEmulator;
 Keywords=terminal;shell;console;command;prompt;
 StartupWMClass=gtty
 StartupNotify=true
+Actions=new-window;
+
+# The dock's / launcher's right-click menu: another gtty with a shell.
+[Desktop Action new-window]
+Name=New Window
+Exec=gtty

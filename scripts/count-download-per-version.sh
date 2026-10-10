@@ -1,0 +1,1 @@
+curl -s https://api.github.com/repos/gttyterm/gtty/releases | jq -r '.[][] | select(.name != null) | "\(.name): \(.download_count)"' 2>/dev/null || curl -s https://api.github.com/repos/gttyterm/gtty/releases | jq -r '.[].assets[] | "\(.name): \(.download_count)"'

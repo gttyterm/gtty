@@ -28,7 +28,7 @@ pub const Zoom = union(enum) {
     set: f32,
 };
 
-pub const MenuPick = enum { run, settings, copy, paste, select_all, new_shell, new_window, sync_typing, about };
+pub const MenuPick = enum { run, settings, new_shell, new_window, sync_typing, about };
 
 pub const Command = union(enum) {
     /// No leading `/`: the OS gets the first chance (see above).
@@ -81,7 +81,7 @@ pub const Command = union(enum) {
     drag: [4]f32,
     /// /resize <w> <h> — resize gtty's OS window (window coordinates).
     resize: [2]f32,
-    /// /menu run | settings | copy | paste | select-all | new-shell | new-window | sync-typing | about — pick a
+    /// /menu run | settings | new-shell | new-window | sync-typing | about — pick a
     /// menu entry, as the
     /// menu bar would (for scripts: macOS menus can't be clicked).
     menu: MenuPick,
@@ -263,12 +263,9 @@ pub fn parseGtty(text: []const u8, explicit: bool) Command {
     if (eq(sub, "key")) return if (rest.len > 0) .{ .key = rest } else .{ .bad = "/key ctrl+shift+left" };
     if (eq(sub, "wait")) return .{ .wait = std.fmt.parseInt(u32, rest, 10) catch 500 };
     if (eq(sub, "menu")) {
-        const usage = "/menu run | settings | copy | paste | select-all | new-shell | new-window | sync-typing | about";
+        const usage = "/menu run | settings | new-shell | new-window | sync-typing | about";
         if (eq(rest, "run")) return .{ .menu = .run };
         if (eq(rest, "settings")) return .{ .menu = .settings };
-        if (eq(rest, "copy")) return .{ .menu = .copy };
-        if (eq(rest, "paste")) return .{ .menu = .paste };
-        if (eq(rest, "select-all")) return .{ .menu = .select_all };
         if (eq(rest, "new-shell")) return .{ .menu = .new_shell };
         if (eq(rest, "new-window")) return .{ .menu = .new_window };
         if (eq(rest, "sync-typing")) return .{ .menu = .sync_typing };

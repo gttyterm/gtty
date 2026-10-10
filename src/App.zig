@@ -26,6 +26,8 @@ const Menu = @import("ui/Menu.zig");
 const SettingsWindow = @import("ui/SettingsWindow.zig");
 const Config = @import("core/Config.zig");
 const FileOpener = @import("ui/FileOpener.zig");
+const FileFx = @import("ui/FileFx.zig");
+const Modal = @import("ui/Modal.zig");
 const RemoteLink = @import("core/RemoteLink.zig");
 const ids_mod = @import("ui/ids.zig");
 const oscmd = @import("core/oscmd.zig");
@@ -119,6 +121,10 @@ over_grid_sort: bool = false,
 /// there for `tip_delay_ms`.
 tip: ?Tip = null,
 tip_drawn: bool = false,
+/// The symbolic link name under the mouse (`JobWindow.linkAt`): after
+/// `tip_delay_ms` a box over it shows where it points (`drawLinkHover`);
+/// a click on the box cd's to the folder the target is in.
+link_hover: ?LinkHover = null,
 /// Height of everything in the job grid (to scroll through).
 grid_content_h: f32 = 0,
 /// The job grid's scroll bar: a strip down its right edge.
@@ -166,11 +172,19 @@ sub_labels: [JobWindow.folder_history_max][folder_label_max * 4 + 4]u8 = undefin
 /// This session's copies from job windows, newest first (the right-click
 /// menu's Paste ▸).
 paste_history: std.ArrayList([]u8) = .empty,
-/// `show`'s app picker, while open: the file and the apps that can open
-/// it (the menu's rows, in order).
+/// `show`'s app picker or the file menu's Open With ▸, while open: the
+/// file and the apps that can open it (row code k = app k).
 picker_path: ?[:0]u8 = null,
 picker_apps: []c.gtty_app = &.{},
+/// Their icons (macOS), as the menu rows show them.
+picker_icons: []?*c.SDL_Texture = &.{},
+/// The file menu's "Open with <default app>".
+open_label: [300]u8 = undefined,
 picker_title: [300]u8 = undefined,
+/// The file the system's app chooser was opened for (its name, for the
+/// answer's notice).
+chooser_file: [256]u8 = undefined,
+chooser_file_len: usize = 0,
 msg_buf: [512]u8 = undefined,
 msg_len: usize = 0,
 msg_color: Rgb = .{ .r = 0, .g = 0, .b = 0 },
@@ -245,6 +259,33 @@ drag_path: ?[:0]u8 = null,
 inside_drop: ?struct { target: InsideTarget, ms: u64 } = null,
 /// Copies of dropped files running in the background (gtty_copy).
 copying: std.ArrayList(Copying) = .empty,
+/// The modal dialog that is open (one at a time), and what its answer is
+/// for (`resolveModal`).
+modal: ?Modal = null,
+modal_job: ModalJob = .none,
+/// File actions: the ⌘-clicked names (Ctrl-click on Linux), gtty's file
+/// clipboard (copy / cut, waiting for a paste), when the mouse last moved
+/// or clicked and when a key was last pressed (`pointerFresh`).
+file_sel: std.ArrayList(FileSel) = .empty,
+file_clip: std.ArrayList([:0]u8) = .empty,
+file_clip_move: bool = false,
+last_point_ms: u64 = 0,
+last_key_ms: u64 = 0,
+/// The file menu's files, Paste's folder, the name's place on screen (the
+/// rename field goes there), and its labels' text.
+menu_files: ?[][:0]u8 = null,
+menu_dest: ?[:0]u8 = null,
+menu_anchor: ?Rect = null,
+/// The name the file menu is for (Copy / Cut flash it).
+menu_range: ?Screen.TextRange = null,
+/// The file menu's "cd <folder>" label.
+menu_cd_label: [cd_label_max * 4 + 8]u8 = undefined,
+/// The next `JobWindow.file_fx` id (FileFx: what a mouse action did to a
+/// window's files, shown on it for a moment).
+fx_next_id: u32 = 1,
+/// A file dragged out of gtty (`drag_path`): once the drag ends, checked
+/// for a while; gone from its folder → moved out (FileFx on its window).
+drag_out: ?struct { window: ids_mod.Id, ended_ms: u64 = 0, next_ms: u64 = 0 } = null,
 /// The window whose text the mouse is over (its file opener follows the
 /// mouse).
 hover_src: ?ids_mod.Id = null,
@@ -377,6 +418,9 @@ pub fn create(gpa: std.mem.Allocator, opts: Options) !*App {
     menu_app = app;
     JobWindow.sync_hook = .{ .ctx = app, .f = syncMirror };
     FileOpener.enabled = opts.cfg.file_opener;
+    JobWindow.color_folders = opts.cfg.color_folders;
+    JobWindow.refresh_ls = opts.cfg.refresh_ls;
+    if (c.getenv("GTTY_COLOR_FOLDERS")) |v| JobWindow.color_folders = !std.mem.eql(u8, std.mem.span(v), "0");
     // Drag and drop with other apps (macOS; Linux only under Wayland).
     c.gtty_drag_init(window);
     Peek.dismiss_ms = opts.cfg.peek_close_ms;
@@ -417,6 +461,13 @@ pub fn destroy(app: *App) void {
     app.drop_paths.deinit(app.gpa);
     if (app.drag_path) |p| app.gpa.free(p);
     app.copying.deinit(app.gpa); // copies still running finish on their own
+    @import("ui/DirCache.zig").deinit();
+    app.freeModalJob(app.modal_job);
+    app.clearFileSel();
+    app.file_sel.deinit(app.gpa);
+    for (app.file_clip.items) |p| app.gpa.free(p);
+    app.file_clip.deinit(app.gpa);
+    app.freeMenuFiles();
     app.prompt.deinit();
     if (app.startup) |s| app.gpa.free(s);
     for (app.script.items) |l| app.gpa.free(l);
@@ -491,6 +542,9 @@ pub fn run(app: *App) void {
         app.tickInsideDrop();
         app.tickFilePress();
         app.tickCopies();
+        app.tickChooser();
+        app.tickDragOut();
+        app.tickModal();
         app.tickPeek();
         app.updateSync();
         if (app.reject_until != 0 and c.SDL_GetTicks() > app.reject_until) {
@@ -504,6 +558,10 @@ pub fn run(app: *App) void {
         if (app.tip) |t| if (c.SDL_GetTicks() -| t.since >= app.tip_delay_ms and !app.tip_drawn) {
             app.dirty = true;
         };
+        if (app.link_hover) |h| if (h.box == null and c.SDL_GetTicks() -| h.since >= app.tip_delay_ms) {
+            app.dirty = true;
+        };
+        app.tickLinkHover();
         if (app.msg_until != 0 and c.SDL_GetTicks() > app.msg_until) {
             app.msg_until = 0;
             app.msg_len = 0;
@@ -1413,6 +1471,8 @@ fn copyJob(app: *App, w: *JobWindow) void {
 /// ⌘C (Ctrl+Shift+C on Linux): the text selected in the focused job
 /// window, or else in any window in the windows area.
 fn copySelection(app: *App) void {
+    // No text selected: the file the mouse has, or the selected files.
+    if (app.fileCopyKey()) return;
     const first = app.activeShown() orelse return;
     var w = app.jobs.items[first];
     if (w.selectedText(app.gpa)) |t| app.gpa.free(t) else for (app.extras.items) |e| if (e.out.sel != null) {
@@ -1441,6 +1501,9 @@ fn toClipboard(app: *App, w: *JobWindow, text: []const u8) void {
 /// Paste shortcut (⌘V, Ctrl+Shift+V, Shift+Insert): into the expanded
 /// peek's filter box, the focused running job, or else the prompt.
 fn pasteKey(app: *App) void {
+    // Files copied last (gtty's file clipboard), the mouse on a window:
+    // paste them there.
+    if (app.filePasteKey()) return;
     if (app.peek) |*pk| if (pk.wantsKeys()) {
         if (c.SDL_GetClipboardText()) |t| {
             defer c.SDL_free(t);
@@ -1448,7 +1511,25 @@ fn pasteKey(app: *App) void {
         }
         return;
     };
+    // Files copied last, the mouse elsewhere: into the current window's
+    // folder.
+    if (app.file_clip.items.len > 0) {
+        if (!app.pasteFilesInto(app.currentJob())) {
+            beep.beep();
+            app.say("point at a window to paste the files", app.theme.stderr_accent);
+        }
+        return;
+    }
     app.pasteInto(app.focusedJob());
+}
+
+/// The clipboard got new text (gtty's copy or another app's): it is now
+/// what was copied last, so files waiting on gtty's file clipboard go.
+fn clipboardChanged(app: *App) void {
+    if (app.file_clip.items.len == 0) return;
+    for (app.file_clip.items) |p| app.gpa.free(p);
+    app.file_clip.clearRetainingCapacity();
+    app.dirty = true;
 }
 
 /// The clipboard into running job `job` (as a terminal paste, see
@@ -1581,6 +1662,7 @@ fn openMenu(app: *App, x: f32, y: f32) bool {
     var paste_ok = true;
     var folders: ?bool = null;
     var output: ?[]const u8 = null;
+    var job: ?*JobWindow = null;
     if (app.maximizedShown() == null and app.prompt.rect.contains(x, y)) {
         target = .prompt;
     } else {
@@ -1597,10 +1679,35 @@ fn openMenu(app: *App, x: f32, y: f32) bool {
         paste_ok = w.running() and w.sync != .follower; // read-only: sync typing
         folders = w.folders_left.items.len > 0;
         output = if (w.copiesLast()) "Copy last output" else "Copy all output";
+        job = w;
     }
     const history_ok = paste_ok and app.paste_history.items.len > 0;
-    paste_ok = paste_ok and c.SDL_HasClipboardText();
+    // Paste: files copied last go into the window's folder (the prompt:
+    // the current window's); text into the job / the prompt.
+    if (app.file_clip.items.len > 0) {
+        var dbuf: [4096]u8 = undefined;
+        paste_ok = pasteFolder(job orelse app.currentJob(), &dbuf) != null;
+    } else paste_ok = paste_ok and c.SDL_HasClipboardText();
     app.popMenu(Menu.edit(target, .{ x, y }, copy_ok, output, paste_ok, history_ok, folders));
+    return true;
+}
+
+/// Where files pasted into window `w` go: the folder its program is in
+/// (in `buf`); null for none, a remote session or no folder.
+fn pasteFolder(w: ?*JobWindow, buf: []u8) ?[]const u8 {
+    const win = w orelse return null;
+    var rbuf: [4096]u8 = undefined;
+    if (win.remoteNow(&rbuf) != null) return null;
+    const d = win.folder(buf);
+    return if (d.len > 0) d else null;
+}
+
+/// Paste (menu row or key) with files on gtty's file clipboard: into
+/// `w`'s folder (asks). False: no place for them there.
+fn pasteFilesInto(app: *App, w: ?*JobWindow) bool {
+    var dbuf: [4096]u8 = undefined;
+    const d = pasteFolder(w, &dbuf) orelse return false;
+    app.askPaste(d, w.?);
     return true;
 }
 
@@ -1619,7 +1726,8 @@ fn closeMenu(app: *App) void {
     const m = app.menu orelse return;
     app.menu = null;
     app.sub_menu = null;
-    if (m.purpose == .open_with) app.freePicker();
+    app.freePicker(); // the picker's, or the file menu's Open With ▸
+    if (m.purpose == .files) app.freeMenuFiles();
     app.dirty = true;
 }
 
@@ -1631,6 +1739,17 @@ fn toggleSubMenu(app: *App, row: usize) void {
     const was_open = app.sub_menu != null and app.sub_row == row;
     app.sub_menu = null;
     if (was_open or !m.rows[row].sub_on) return;
+    const f, _ = app.promptFaces();
+    const bounds: Rect = .{ .x = 0, .y = 0, .w = app.width_px, .h = app.height_px };
+    if (m.purpose == .files) {
+        // "Open with <default>" ▸: the other apps, Other….
+        var sub: Menu = .{ .purpose = .open_with, .at = .{ 0, 0 } };
+        app.addPickerRows(&sub, true);
+        app.sub_row = row;
+        sub.layoutBeside(f, app.scale.ui, bounds, &m, row);
+        app.sub_menu = sub;
+        return;
+    }
     const target = switch (m.purpose) {
         .edit => |t| t,
         else => return,
@@ -1651,9 +1770,24 @@ fn toggleSubMenu(app: *App, row: usize) void {
         for (app.paste_history.items, 0..) |t, i| sub.add(.{ .label = Menu.oneLine(&app.sub_labels[i], t, paste_label_max) });
     }
     app.sub_row = row;
-    const f, _ = app.promptFaces();
-    sub.layout(f, app.scale.ui, .{ .x = 0, .y = 0, .w = app.width_px, .h = app.height_px });
+    sub.layoutBeside(f, app.scale.ui, bounds, &m, row);
     app.sub_menu = sub;
+}
+
+/// The mouse moved in the menu: a row that only opens a submenu (Open
+/// With… ▸), or a file menu row's ▸ box, opens it; moving onto another
+/// row closes such a submenu.
+fn hoverSubMenu(app: *App) void {
+    const m = app.menu orelse return;
+    const i = m.over orelse return;
+    const open_here = app.sub_menu != null and app.sub_row == i;
+    const files = m.purpose == .files;
+    if (m.rows[i].hover_sub or (files and m.over_arrow)) {
+        if (!open_here) app.toggleSubMenu(i);
+    } else if (app.sub_menu != null and app.sub_row != i and app.sub_row < m.n and (files or m.rows[app.sub_row].hover_sub)) {
+        app.sub_menu = null;
+        app.dirty = true;
+    }
 }
 
 /// A left click inside the open menu: act on an enabled row and close;
@@ -1661,20 +1795,25 @@ fn toggleSubMenu(app: *App, row: usize) void {
 /// paste history.
 fn menuClick(app: *App, x: f32, y: f32) void {
     const m = app.menu orelse return;
-    if (m.arrowAt(x, y)) |row| return app.toggleSubMenu(row);
+    if (m.arrowAt(x, y)) |row| {
+        // The file menu's ▸ opened on hover: a click keeps it.
+        if (m.purpose == .files and app.sub_menu != null and app.sub_row == row) return;
+        return app.toggleSubMenu(row);
+    }
     const row = m.rowAt(x, y) orelse return;
     if (!m.isEnabled(row)) return;
+    // A row that only opens a submenu: open it (a click doesn't close it).
+    if (m.rows[row].hover_sub) {
+        if (!(app.sub_menu != null and app.sub_row == row)) app.toggleSubMenu(row);
+        return;
+    }
     switch (m.purpose) {
         .bar => {
             const code = m.codes[row];
             app.closeMenu();
             app.menuPick(code);
         },
-        .open_with => {
-            // The picker's data is freed with the menu: open first.
-            if (app.picker_path) |path| if (row < app.picker_apps.len) app.openWith(path, &app.picker_apps[row]);
-            app.closeMenu();
-        },
+        .open_with => app.openWithPick(m.codes[row]),
         .edit => |target| {
             app.closeMenu();
             const job: ?*JobWindow = switch (target) {
@@ -1687,7 +1826,11 @@ fn menuClick(app: *App, x: f32, y: f32) void {
                     defer app.gpa.free(text);
                     app.toClipboard(w, text);
                 },
-                Menu.edit_paste => if (job) |w| {
+                // What was copied last: files into the window's folder
+                // (the prompt: the current window's), else the text.
+                Menu.edit_paste => if (app.file_clip.items.len > 0) {
+                    if (!app.pasteFilesInto(job orelse app.currentJob())) app.say("nowhere to paste the files here", app.theme.dim);
+                } else if (job) |w| {
                     if (w.running()) app.pasteInto(w);
                 } else app.pasteInto(null),
                 // The title-bar copy: the last command's output (or all), with
@@ -1704,6 +1847,18 @@ fn menuClick(app: *App, x: f32, y: f32) void {
                 else => {},
             }
         },
+        .files => |uid| {
+            // Keep the files and Paste's folder while the menu goes.
+            const files = app.menu_files;
+            const dest = app.menu_dest;
+            app.menu_files = null;
+            app.menu_dest = null;
+            app.closeMenu();
+            app.menu_files = files;
+            app.menu_dest = dest;
+            app.fileMenuPick(uid, m.codes[row]);
+            app.freeMenuFiles();
+        },
         .paste_history, .folder_history => {}, // the submenus have their own click (subMenuClick)
     }
 }
@@ -1716,6 +1871,7 @@ fn subMenuClick(app: *App, x: f32, y: f32) void {
     if (!sm.isEnabled(row)) return;
     const target = switch (sm.purpose) {
         .paste_history => |t| t,
+        .open_with => return app.openWithPick(sm.codes[row]),
         .folder_history => |uid| {
             const w = app.jobByUid(uid) orelse return app.closeMenu();
             app.closeMenu();
@@ -1761,13 +1917,6 @@ fn menuPick(app: *App, code: i32) void {
             app.about_visible = true;
             app.dirty = true;
         },
-        // Edit: for the settings window when it has the keyboard (its
-        // fields), else as ⌘C / ⌘V do; Select All: the window's text.
-        c.GTTY_MENU_COPY => app.copySelection(),
-        c.GTTY_MENU_PASTE => if (app.settingsFocused()) |sw| {
-            sw.onKey(c.SDLK_V, if (builtin.os.tag == .macos) c.SDL_KMOD_LGUI else c.SDL_KMOD_LCTRL);
-        } else app.pasteKey(),
-        c.GTTY_MENU_SELECT_ALL => app.selectAll(),
         else => {},
     }
 }
@@ -1790,24 +1939,18 @@ fn menuChecked(code: c_int) callconv(.c) bool {
 fn menuRowEnabled(app: *App, code: c_int) bool {
     return switch (code) {
         c.GTTY_MENU_SYNC_TYPING => app.sync_src != null or app.canSync(app.currentJob()),
-        c.GTTY_MENU_COPY => app.settingsFocused() == null and app.hasSelection(),
-        c.GTTY_MENU_PASTE => c.SDL_HasClipboardText(),
-        c.GTTY_MENU_SELECT_ALL => app.settingsFocused() == null and app.main != null,
         else => true,
     };
 }
 
-/// A key press the native menu bar's Edit menu also gets (and acts on):
-/// ⌘C / ⌘V / ⌘A alone, while that row is enabled.
+/// A key press the native menu bar also gets (and acts on): ⌘N / ⌘T
+/// alone, while that row is enabled.
 fn menuOwnsKey(app: *App, key: c.SDL_Keycode, mod: c.SDL_Keymod) bool {
     if (builtin.os.tag != .macos or !app.native_menu) return false;
     if (mod & c.SDL_KMOD_GUI == 0 or mod & (c.SDL_KMOD_CTRL | c.SDL_KMOD_ALT | c.SDL_KMOD_SHIFT) != 0) return false;
     const code = switch (key) {
         c.SDLK_N => c.GTTY_MENU_NEW_WINDOW,
         c.SDLK_T => c.GTTY_MENU_NEW_SHELL,
-        c.SDLK_C => c.GTTY_MENU_COPY,
-        c.SDLK_V => c.GTTY_MENU_PASTE,
-        c.SDLK_A => c.GTTY_MENU_SELECT_ALL,
         else => return false,
     };
     return app.menuRowEnabled(code);
@@ -1836,7 +1979,7 @@ fn hasSelection(app: *App) bool {
     return false;
 }
 
-/// Edit ▸ Select All: all the text of the window you're typing into (or
+/// ⌘A (Ctrl+Shift+A on Linux): all the text of the window you're typing into (or
 /// the current one).
 fn selectAll(app: *App) void {
     const w = app.focused() orelse if (app.main) |m| app.jobs.items[m] else return;
@@ -1866,11 +2009,6 @@ fn barRows(app: *App, which: Menu.Bar, rows: *[Menu.max_rows]Menu.Row, codes: *[
             Add(rows, codes, &n, .{ .label = "New Shell", .key = Menu.new_shell_key }, c.GTTY_MENU_NEW_SHELL);
             Add(rows, codes, &n, .{ .label = "Run command" }, c.GTTY_MENU_RUN);
             Add(rows, codes, &n, .{ .label = "Sync typing", .key = if (app.sync_src != null) "✓" else "", .enabled = app.menuRowEnabled(c.GTTY_MENU_SYNC_TYPING) }, c.GTTY_MENU_SYNC_TYPING);
-        },
-        .edit => {
-            Add(rows, codes, &n, .{ .label = "Copy", .key = Menu.edit_keys[0], .enabled = app.menuRowEnabled(c.GTTY_MENU_COPY) }, c.GTTY_MENU_COPY);
-            Add(rows, codes, &n, .{ .label = "Paste", .key = Menu.edit_keys[1], .enabled = app.menuRowEnabled(c.GTTY_MENU_PASTE) }, c.GTTY_MENU_PASTE);
-            Add(rows, codes, &n, .{ .label = "Select All", .enabled = app.menuRowEnabled(c.GTTY_MENU_SELECT_ALL) }, c.GTTY_MENU_SELECT_ALL);
         },
     }
     return n;
@@ -1959,6 +2097,8 @@ fn applyChange(app: *App, ch: SettingsWindow.Change) void {
         },
         .marks => app.setMarks(app.cfg.marks, app.cfg.mark_width),
         .file_opener => app.setFileOpener(app.cfg.file_opener),
+        .color_folders => app.setColorFolders(app.cfg.color_folders),
+        .refresh_ls => JobWindow.refresh_ls = app.cfg.refresh_ls,
         .quit_on_last_shell => app.quit_on_last_shell = app.cfg.quit_on_last_shell,
         .command => {}, // at the next start
         .ai => {}, // read at each request
@@ -2052,7 +2192,8 @@ fn openFolder(app: *App, w: *JobWindow) void {
 // ------------------------------------------------------------ show
 
 /// `show <file>`: open the file with its default app, or let the user pick
-/// the app (`-a`, or when the file has no default app). No job window.
+/// the app (`-a`, or when the file has no default app: the app picker,
+/// else the system's app chooser). No job window.
 /// A relative path is taken from gtty's folder; `~` is the home folder.
 fn showFile(app: *App, path_in: []const u8, pick: bool) void {
     var buf: [4096]u8 = undefined;
@@ -2083,27 +2224,18 @@ fn expandHome(buf: []u8, path: []const u8) ?[:0]const u8 {
 }
 
 /// The app picker for `path`: a menu over the prompt listing the apps
-/// that can open it (the default one first, marked).
+/// that can open it (the default one first, marked), then Other…; no app
+/// known: the system's app chooser at once.
 fn openPicker(app: *App, path: [:0]const u8) void {
-    var apps: [Menu.max_rows]c.gtty_app = undefined;
-    const n: usize = @intCast(@max(c.gtty_open_apps(path.ptr, &apps, apps.len), 0));
     const base = std.fs.path.basename(path);
-    if (n == 0) {
-        beep.beep();
-        return app.sayFmt("show: no app can open {s}", .{base}, app.theme.stderr_accent);
-    }
     app.closeMenu();
-    app.picker_path = app.gpa.dupeZ(u8, path) catch return;
-    app.picker_apps = app.gpa.dupe(c.gtty_app, apps[0..n]) catch {
+    if (!app.loadPicker(path)) {
         app.freePicker();
-        return;
-    };
+        return app.chooseApp(path);
+    }
     var m: Menu = .{ .purpose = .open_with, .at = .{ app.prompt.rect.x, app.prompt.rect.y } };
     m.title = std.fmt.bufPrint(&app.picker_title, "Open {s} with", .{base}) catch "Open with";
-    for (app.picker_apps) |*a| m.add(.{
-        .label = std.mem.sliceTo(&a.name, 0),
-        .key = if (a.is_default != 0) "default" else "",
-    });
+    app.addPickerRows(&m, false);
     app.popMenu(m);
     // Its bottom on the prompt's top (the size is known once laid out).
     if (app.menu) |*pm| {
@@ -2113,11 +2245,110 @@ fn openPicker(app: *App, path: [:0]const u8) void {
     }
 }
 
+/// Fill `picker_path` / `picker_apps` / `picker_icons` with the apps
+/// that can open `path` (the default one first; room left for the
+/// separators and Other…). False: no app known (`picker_path` is set
+/// all the same, for Other…).
+fn loadPicker(app: *App, path: [:0]const u8) bool {
+    app.freePicker();
+    app.picker_path = app.gpa.dupeZ(u8, path) catch return false;
+    var apps: [Menu.max_rows - 3]c.gtty_app = undefined;
+    const n: usize = @intCast(@max(c.gtty_open_apps(path.ptr, &apps, apps.len), 0));
+    if (n == 0) return false;
+    app.picker_apps = app.gpa.dupe(c.gtty_app, apps[0..n]) catch return false;
+    app.picker_icons = app.gpa.alloc(?*c.SDL_Texture, n) catch {
+        app.freePicker();
+        return false;
+    };
+    @memset(app.picker_icons, null);
+    const f, _ = app.promptFaces();
+    const px = Menu.iconPx(f);
+    const rgba = app.gpa.alloc(u8, px * px * 4) catch return true;
+    defer app.gpa.free(rgba);
+    for (app.picker_apps, app.picker_icons) |*a, *icon| {
+        if (c.gtty_app_icon(@ptrCast(&a.id), @intCast(px), rgba.ptr) == 1) icon.* = app.gfx.imageRgba(rgba, px);
+    }
+    return true;
+}
+
+/// The default app of the loaded picker, if the file has one.
+fn pickerDefault(app: *App) ?usize {
+    return if (app.picker_apps.len > 0 and app.picker_apps[0].is_default != 0) 0 else null;
+}
+
+/// The picker's rows (row code k = `picker_apps[k]`), then a line and
+/// Other…. With the default app: it first and a line after it, or left
+/// out (`skip_default`: the file menu's "Open with <it>" row is it).
+fn addPickerRows(app: *App, m: *Menu, skip_default: bool) void {
+    for (app.picker_apps, app.picker_icons, 0..) |*a, icon, k| {
+        const def = a.is_default != 0;
+        if (def and skip_default) continue;
+        m.addCode(.{ .label = std.mem.sliceTo(&a.name, 0), .key = if (def) "default" else "", .icon = icon }, @intCast(k));
+        if (def and k + 1 < app.picker_apps.len) m.add(Menu.separator);
+    }
+    if (m.n > 0) m.add(Menu.separator);
+    m.addCode(.{ .label = "Other…" }, Menu.open_with_other);
+}
+
+/// A row of the app picker (or of Open With ▸) was picked: open the file
+/// with that app, or ask the system (Other…). Closes the menu.
+fn openWithPick(app: *App, code: i32) void {
+    // The picker's data is freed with the menu: act first.
+    if (app.picker_path) |path| {
+        if (code == Menu.open_with_other) {
+            app.chooseApp(path);
+        } else if (code >= 0 and code < app.picker_apps.len) {
+            app.openWith(path, &app.picker_apps[@intCast(code)]);
+        }
+    }
+    app.closeMenu();
+}
+
+/// The system's choose-an-app dialog for `path` (macOS: a sheet on
+/// gtty's window as Finder's Other…; Linux: the desktop portal's app
+/// chooser). The answer arrives in `tickChooser`. `GTTY_SHOW_DRY=1` only
+/// says it.
+fn chooseApp(app: *App, path: [:0]const u8) void {
+    const base = std.fs.path.basename(path);
+    if (c.getenv("GTTY_SHOW_DRY") != null)
+        return app.sayFmt("show: would ask which app opens {s}", .{base}, app.theme.dim);
+    var why: [256]u8 = undefined;
+    if (c.gtty_choose_app(app.window, path.ptr, &why, why.len) == 0) {
+        beep.beep();
+        return app.sayFmt("{s}", .{std.mem.sliceTo(&why, 0)}, app.theme.stderr_accent);
+    }
+    const n = @min(base.len, app.chooser_file.len);
+    @memcpy(app.chooser_file[0..n], base[0..n]);
+    app.chooser_file_len = n;
+    app.sayFmt("choose the app that opens {s}", .{base}, app.theme.dim);
+}
+
+/// The app chooser's answer, once it has one.
+fn tickChooser(app: *App) void {
+    var text: [512]u8 = undefined;
+    const r = c.gtty_choose_app_take(&text, text.len);
+    if (r == 0) return;
+    const base = app.chooser_file[0..app.chooser_file_len];
+    const t = std.mem.sliceTo(&text, 0);
+    switch (r) {
+        1 => app.sayFmt("opened {s} with {s}", .{ base, t }, app.theme.dim),
+        2 => app.say("nothing opened", app.theme.dim),
+        3 => {}, // the system opens it
+        else => {
+            beep.beep();
+            app.sayFmt("could not open {s}: {s}", .{ base, t }, app.theme.stderr_accent);
+        },
+    }
+}
+
 fn freePicker(app: *App) void {
     if (app.picker_path) |p| app.gpa.free(p);
     app.picker_path = null;
     app.gpa.free(app.picker_apps);
     app.picker_apps = &.{};
+    for (app.picker_icons) |icon| if (icon) |t| c.SDL_DestroyTexture(t);
+    app.gpa.free(app.picker_icons);
+    app.picker_icons = &.{};
 }
 
 /// A row of the app picker was picked.
@@ -2160,24 +2391,16 @@ fn peekChip(w: *const JobWindow, kind: Peek.Kind) Gfx.Rect {
     };
 }
 
-/// Open the peek of window `i`'s folder chip (closing any other peek);
-/// `expanded` (a click): straight into the list of folders above.
-fn openFolderPeek(app: *App, i: usize, expanded: bool) void {
+/// Open the peek of window `i`'s folder chip (hover or click; closing any
+/// other peek): the full path; its expand button grows it into the list.
+fn openFolderPeek(app: *App, i: usize) void {
     const w = app.jobs.items[i];
     if (w.cwd().len == 0) return;
-    if (app.peek) |*pk| if (pk.uid == w.uid and pk.kind == .folder) {
-        if (expanded and !pk.expanded) {
-            pk.expanded = true;
-            app.layoutPeek();
-            app.dirty = true;
-        }
-        return;
-    };
+    if (app.peek) |pk| if (pk.uid == w.uid and pk.kind == .folder) return;
     app.closePeek();
     app.hideTip();
     app.chip_hover = null;
     app.peek = Peek.openFolder(app.gpa, w.uid, w.cwd(), w.folder_chip_r) catch return;
-    app.peek.?.expanded = expanded;
     w.folder_peek_open = true;
     app.layoutPeek();
     app.dirty = true;
@@ -2253,7 +2476,7 @@ fn tickPeek(app: *App) void {
     if (app.chip_hover) |h| if (now -| h.since >= app.chip_hover_ms) {
         app.chip_hover = null;
         for (app.jobs.items, 0..) |w, i| if (w.uid == h.uid) {
-            if (h.hit == .folder_chip) app.openFolderPeek(i, false) else app.openGitPeek(i);
+            if (h.hit == .folder_chip) app.openFolderPeek(i) else app.openGitPeek(i);
         };
     };
     if (app.peek == null) return;
@@ -2264,7 +2487,8 @@ fn tickPeek(app: *App) void {
         app.dirty = true;
     }
     switch (pk.kind) {
-        .git => if (pk.state != .busy) if (w.branch()) |b| pk.setFull(b),
+        // Out of the repo: the chip is disabled, its peek goes.
+        .git => if (pk.state != .busy) if (w.branch()) |b| pk.setFull(b) else return app.closePeek(),
         // The shell went elsewhere (not by this peek): its list is stale.
         .folder => if (pk.state == .idle and !std.mem.eql(u8, w.cwd(), pk.full)) return app.closePeek(),
     }
@@ -2543,7 +2767,7 @@ fn stepPlan(app: *App, now: u64) void {
                 switch (p.actions[app.ai_step]) {
                     .shell => |sh| app.aiRunScript(w, sh.script, p.summary),
                     .cd => |cd| {
-                        w.cdTo(cd.dir);
+                        w.cdOnly(cd.dir);
                         w.out.ai = .armed; // an AI line too (purple), waited for
                     },
                     else => unreachable,
@@ -2833,9 +3057,6 @@ fn execGtty(app: *App, cmd_parsed: commands.Command) void {
         .menu => |pick| app.menuPick(switch (pick) {
             .run => c.GTTY_MENU_RUN,
             .settings => c.GTTY_MENU_SETTINGS,
-            .copy => c.GTTY_MENU_COPY,
-            .paste => c.GTTY_MENU_PASTE,
-            .select_all => c.GTTY_MENU_SELECT_ALL,
             .new_shell => c.GTTY_MENU_NEW_SHELL,
             .new_window => c.GTTY_MENU_NEW_WINDOW,
             .sync_typing => c.GTTY_MENU_SYNC_TYPING,
@@ -2972,6 +3193,7 @@ fn keySpec(spec: []const u8) ?struct { key: c.SDL_Keycode, mod: c.SDL_Keymod } {
         .{ .name = "a", .v = c.SDLK_A },                 .{ .name = "period", .v = c.SDLK_PERIOD },
         .{ .name = "n", .v = c.SDLK_N },                 .{ .name = "t", .v = c.SDLK_T },
         .{ .name = "pageup", .v = c.SDLK_PAGEUP },       .{ .name = "pagedown", .v = c.SDLK_PAGEDOWN },
+        .{ .name = "x", .v = c.SDLK_X },                 .{ .name = "f2", .v = c.SDLK_F2 },
     };
     var mod: c.SDL_Keymod = 0;
     var it = std.mem.splitScalar(u8, spec, '+');
@@ -3115,6 +3337,7 @@ fn handle(app: *App, ev: *const c.SDL_Event) void {
         c.SDL_EVENT_WINDOW_MOUSE_LEAVE => app.onMouseLeave(),
         c.SDL_EVENT_MOUSE_WHEEL => app.onWheel(ev.wheel.mouse_x * app.density, ev.wheel.mouse_y * app.density, ev.wheel.y),
         c.SDL_EVENT_DROP_BEGIN, c.SDL_EVENT_DROP_POSITION, c.SDL_EVENT_DROP_FILE, c.SDL_EVENT_DROP_COMPLETE => app.onDrop(ev),
+        c.SDL_EVENT_CLIPBOARD_UPDATE => app.clipboardChanged(),
         else => {},
     }
 }
@@ -3134,6 +3357,11 @@ fn eventWindow(ev: *const c.SDL_Event) c.SDL_WindowID {
 
 /// Typed text goes to the focused running window, otherwise to the prompt.
 fn onText(app: *App, text: []const u8) void {
+    if (app.modal) |*m| {
+        m.typed(text, c.SDL_GetTicks());
+        app.dirty = true;
+        return;
+    }
     if (app.peek) |*pk| if (pk.wantsKeys()) {
         pk.text(text);
         app.layoutPeek();
@@ -3154,10 +3382,28 @@ fn onKey(app: *App, key: c.SDL_Keycode, mod: c.SDL_Keymod) void {
     const alt = mod & c.SDL_KMOD_ALT != 0;
     const shift = mod & c.SDL_KMOD_SHIFT != 0;
     app.dirty = true;
+    // The mouse no longer "has" a file (`pointerFresh`) once a key is
+    // pressed (modifier keys alone don't count).
+    defer if (!isModifier(key)) {
+        app.last_key_ms = c.SDL_GetTicks();
+    };
 
     // Any key closes the About box, and does nothing else.
     if (app.about_visible) {
         app.about_visible = false;
+        return;
+    }
+    // A modal takes every key (Enter, Esc, ←/→/Tab, its field's editing
+    // keys and paste; the rest does nothing).
+    if (app.modal) |*m| {
+        if (key == c.SDLK_V and (cmd or (ctrl and shift))) {
+            if (c.SDL_GetClipboardText()) |t| {
+                defer c.SDL_free(t);
+                m.typed(std.mem.span(t), c.SDL_GetTicks());
+            }
+            return;
+        }
+        if (m.key(key, mod, c.SDL_GetTicks())) |p| app.resolveModal(p, .picked);
         return;
     }
     // Esc cancels a remote copy in progress (its modal is up).
@@ -3171,6 +3417,9 @@ fn onKey(app: *App, key: c.SDL_Keycode, mod: c.SDL_Keymod) void {
 
     // An expanded peek has the keyboard (its filter box and list).
     if (app.peek) |*pk| if (pk.wantsKeys() and !cmd) return app.peekAction(pk.key(key));
+
+    // File actions on the name the mouse has (or the selected names).
+    if (app.fileKey(key, ctrl, cmd, alt, shift)) return;
 
     // Esc closes an open kill menu (instead of going to the job).
     if (key == c.SDLK_ESCAPE) for (app.jobs.items) |w| if (w.kill_menu) {
@@ -3206,6 +3455,9 @@ fn onKey(app: *App, key: c.SDL_Keycode, mod: c.SDL_Keymod) void {
     // Paste: ⌘V, Ctrl+Shift+V or Shift+Insert (Ctrl+V alone is the job's).
     if (key == c.SDLK_V and (cmd or (ctrl and shift))) return app.pasteKey();
     if (key == c.SDLK_INSERT and shift and !ctrl and !cmd and !alt) return app.pasteKey();
+    // Select all the window's text: ⌘A, or Ctrl+Shift+A (Ctrl+A alone is
+    // the job's: start of line).
+    if (key == c.SDLK_A and ((cmd and !ctrl and !alt and !shift) or (ctrl and shift and !cmd))) return app.selectAll();
     // Moving in a job's input: words with Ctrl or ⌥ + arrows, selecting
     // with Shift (see editKey).
     if (app.focusedJob()) |w| if (app.editKey(w, key, ctrl, cmd, alt, shift)) return;
@@ -3219,7 +3471,7 @@ fn onKey(app: *App, key: c.SDL_Keycode, mod: c.SDL_Keymod) void {
     }
     // A running window has focus: keys go straight to its terminal.
     if (app.focusedJob()) |w| {
-        if (jobKeyBytes(key, ctrl, shift)) |bytes| {
+        if (jobKeyBytes(key, ctrl, shift, w.out.app_cursor, w.out.alt != null)) |bytes| {
             w.typeBytes(bytes);
         } else switch (key) {
             c.SDLK_PAGEUP => w.out.scrollBy(@intCast(w.rows -| 1)),
@@ -3322,7 +3574,10 @@ fn editKey(app: *App, w: *JobWindow, key: c.SDL_Keycode, ctrl: bool, cmd: bool, 
 }
 
 /// Bytes a terminal sends for a non-text key (text arrives as TEXT_INPUT).
-fn jobKeyBytes(key: c.SDL_Keycode, ctrl: bool, shift: bool) ?[]const u8 {
+/// `app_cursor`: the program asked for application cursor keys (vim, less);
+/// `full_screen`: it runs on the alternate screen, so PageUp / PageDown
+/// are its keys, not gtty's scrolling.
+fn jobKeyBytes(key: c.SDL_Keycode, ctrl: bool, shift: bool, app_cursor: bool, full_screen: bool) ?[]const u8 {
     if (ctrl and key >= c.SDLK_A and key <= c.SDLK_Z) {
         const ctl = comptime blk: {
             var t: [26][1]u8 = undefined;
@@ -3336,19 +3591,34 @@ fn jobKeyBytes(key: c.SDL_Keycode, ctrl: bool, shift: bool) ?[]const u8 {
         c.SDLK_BACKSPACE => "\x7f",
         c.SDLK_TAB => if (shift) "\x1b[Z" else "\t",
         c.SDLK_ESCAPE => "\x1b",
-        c.SDLK_UP => "\x1b[A",
-        c.SDLK_DOWN => "\x1b[B",
-        c.SDLK_RIGHT => "\x1b[C",
-        c.SDLK_LEFT => "\x1b[D",
-        c.SDLK_HOME => "\x1b[H",
-        c.SDLK_END => "\x1b[F",
+        c.SDLK_UP => if (app_cursor) "\x1bOA" else "\x1b[A",
+        c.SDLK_DOWN => if (app_cursor) "\x1bOB" else "\x1b[B",
+        c.SDLK_RIGHT => if (app_cursor) "\x1bOC" else "\x1b[C",
+        c.SDLK_LEFT => if (app_cursor) "\x1bOD" else "\x1b[D",
+        c.SDLK_HOME => if (app_cursor) "\x1bOH" else "\x1b[H",
+        c.SDLK_END => if (app_cursor) "\x1bOF" else "\x1b[F",
         c.SDLK_DELETE => "\x1b[3~",
+        c.SDLK_PAGEUP => if (full_screen) "\x1b[5~" else null,
+        c.SDLK_PAGEDOWN => if (full_screen) "\x1b[6~" else null,
         else => null,
     };
 }
 
 fn onClick(app: *App, x: f32, y: f32, button: u8, clicks: u8) void {
     app.hideTip();
+    // The link box: a click on it cd's to the target's folder; a click
+    // elsewhere closes it and still acts.
+    if (app.link_hover) |h| if (h.box) |b| if (b.contains(x, y) and app.modal == null and app.menu == null) {
+        if (button == c.SDL_BUTTON_LEFT) app.linkHoverClick();
+        return;
+    };
+    app.hideLinkHover();
+    // A modal: a left click on one of its buttons picks it; nothing else
+    // does anything.
+    if (app.modal) |*m| {
+        if (button == c.SDL_BUTTON_LEFT) if (m.click(x, y)) |p| app.resolveModal(p, .picked);
+        return;
+    }
     // Any click closes the About box, and does nothing else.
     if (app.about_visible) {
         app.about_visible = false;
@@ -3398,11 +3668,20 @@ fn onClick(app: *App, x: f32, y: f32, button: u8, clicks: u8) void {
     // A left press on an outlined file name goes to the window's file
     // opener first: double-click opens it; a single press waits to see if
     // it becomes a click, a drag of the file or a text selection.
+    app.last_point_ms = c.SDL_GetTicks();
+    const sel_mod = c.SDL_GetModState() & (if (builtin.os.tag == .macos) c.SDL_KMOD_GUI else c.SDL_KMOD_CTRL) != 0;
     if (button == c.SDL_BUTTON_LEFT) if (app.textWindowAt(x, y)) |i| {
         // Hover there first (the outline is for the spot clicked).
         app.mouse = .{ x, y };
         app.sendHover();
         const w = app.jobs.items[i];
+        // ⌘-click (Ctrl-click) on a name: select it (or not) for the file
+        // actions; a plain click drops the selection.
+        if (sel_mod and FileOpener.enabled) if (w.fileMarkAt(x, y)) |m| if (!m.remote) {
+            if (clicks == 1) app.toggleFileSel(w, m);
+            return;
+        };
+        app.clearFileSel();
         if (w.fileMarkAt(x, y) != null) switch (clicks) {
             1 => {
                 app.setFocus(i);
@@ -3426,8 +3705,14 @@ fn onClick(app: *App, x: f32, y: f32, button: u8, clicks: u8) void {
         if (button == c.SDL_BUTTON_LEFT) if (app.barButtonAt(x, y)) |i| app.openBarMenu(@enumFromInt(i));
         return;
     }
-    // Right click on job text or the prompt: the Copy / Paste menu.
-    if (button == c.SDL_BUTTON_RIGHT and app.openMenu(x, y)) return;
+    // Right click on a file or folder name: the file actions; elsewhere on
+    // job text or the prompt: the Copy / Paste menu.
+    if (button == c.SDL_BUTTON_RIGHT) {
+        app.mouse = .{ x, y };
+        app.sendHover();
+        if (app.openFileMenu(x, y)) return;
+        if (app.openMenu(x, y)) return;
+    }
     // A maximized job window covers everything.
     if (app.maximizedShown()) |m| return app.clickJob(m, x, y, button, clicks);
     if (app.prompt.rect.contains(x, y)) return app.clearFocus();
@@ -3482,7 +3767,7 @@ fn clickJob(app: *App, i: usize, x: f32, y: f32, button: u8, clicks: u8) void {
         // The git chip: its peek at once (no focus change).
         .git_chip => app.openGitPeek(i),
         // The folder chip: the folders above, at once.
-        .folder_chip => app.openFolderPeek(i, true),
+        .folder_chip => app.openFolderPeek(i),
         .minimize => app.minimizeJob(i),
         .maximize => app.toggleMaximize(i),
         // Anywhere else: the job becomes (or stays) the current job window.
@@ -3496,13 +3781,15 @@ fn clickJob(app: *App, i: usize, x: f32, y: f32, button: u8, clicks: u8) void {
 }
 
 fn onMouseUp(app: *App) void {
-    // A press on a file name that didn't move: a plain click there.
+    // A press on a file name that didn't move: a plain click there, and
+    // the name goes on the clipboard.
     if (app.file_press) |p| {
         app.file_press = null;
         if (app.jobByUid(p.window)) |w| {
             w.opener.held = false;
             w.mouseDown(p.x, p.y, 1);
             w.mouseUp();
+            if (w.fileMarkAt(p.x, p.y)) |m| app.copyNames(@as([]const []const u8, &.{m.file()}), w, m.range);
             app.dirty = true;
         }
     }
@@ -3519,6 +3806,7 @@ fn onMouseUp(app: *App) void {
 /// Drag a selection; mark the hovered row in the current window's gutter;
 /// an I-beam pointer over its text.
 fn onMotion(app: *App, x: f32, y: f32) void {
+    app.last_point_ms = c.SDL_GetTicks();
     if (app.grid_drag) app.gridBarTo(y);
     // A press on a file name moved: held long enough → drag the file out;
     // else → select text from the press.
@@ -3532,8 +3820,10 @@ fn onMotion(app: *App, x: f32, y: f32) void {
         }
     }
     const in_menu = (if (app.menu) |*m| m.contains(x, y) else false) or (if (app.sub_menu) |*m| m.contains(x, y) else false);
+    app.updateLinkHover(x, y, in_menu);
     if (app.menu) |*m| if (m.motion(x, y)) {
         app.dirty = true;
+        app.hoverSubMenu();
     };
     if (app.sub_menu) |*m| if (m.motion(x, y)) {
         app.dirty = true;
@@ -3632,7 +3922,11 @@ fn helpLine(app: *App, buf: []u8) []const u8 {
             .folder => |d| std.fmt.bufPrint(buf, "drop: copy into {s}", .{std.fs.path.basename(d)}) catch "",
         };
     }
-    return if (app.hoverWindow()) |w| w.opener.help(buf) else "";
+    if (app.hoverWindow()) |w| {
+        const h = w.opener.help(buf);
+        if (h.len > 0) return h;
+    }
+    return app.clipHelp(buf);
 }
 
 /// The window whose text the mouse is over, if any.
@@ -3697,7 +3991,7 @@ fn dragFile(app: *App, w: *JobWindow) void {
     app.drag_path = app.gpa.dupeZ(u8, p) catch null;
     app.inside_drop = null;
     const one = [_][*c]const u8{p.ptr};
-    _ = c.gtty_drag_files(app.window, &one, 1);
+    if (c.gtty_drag_files(app.window, &one, 1)) app.drag_out = .{ .window = w.uid };
 }
 
 // ------------------------------------------------------------ drop
@@ -3758,7 +4052,7 @@ fn onDrop(app: *App, ev: *const c.SDL_Event) void {
                     beep.beep();
                     app.say("copying into an ssh session isn't there yet", app.theme.stderr_accent);
                 },
-                .folder => |dest| app.startCopy(app.drop_paths.items, dest),
+                .folder => |dest| app.askCopy(dest),
             }
         },
         else => {},
@@ -3865,6 +4159,8 @@ fn tickInsideDrop(app: *App) void {
                 beep.beep();
                 return app.sayFmt("#{d}: the shell is busy", .{w.serial}, app.theme.stderr_accent);
             }
+            // The command typed into the shell shows what happened: no
+            // effect on the window.
             w.typeFileCommand(if (move) "mv" else "cp", path, if (t.outlined) t.dest() else null);
             _ = c.SDL_RaiseWindow(app.window);
             if (app.indexOfWindow(w)) |i| app.setFocus(i);
@@ -3904,36 +4200,254 @@ fn dropTarget(app: *App, buf: []u8) DropTarget {
     return if (d.len > 0) .{ .folder = d } else .none;
 }
 
-/// A copy of dropped files running in the background.
+/// What the open modal's answer is for. A job owns its data until
+/// `resolveModal` (or `closeModal`) frees it.
+const ModalJob = union(enum) {
+    none,
+    /// Files dropped in from another app: copy them into `dest` (window
+    /// `window`)? Buttons: 0 Cancel, 1 Copy.
+    copy_drop: struct { paths: [][:0]u8, dest: [:0]u8, window: ids_mod.Id },
+    /// Paste gtty's file clipboard into `dest` (copy, or move after a
+    /// cut)? 0 Cancel, 1 Copy / Move.
+    paste: struct { dest: [:0]u8, window: ids_mod.Id },
+    /// Delete `paths` for good? 0 Cancel, 1 Delete.
+    delete: struct { paths: [][:0]u8, window: ids_mod.Id },
+    /// Rename `path` to the field's text? 0 Cancel, 1 Rename.
+    rename: struct { path: [:0]u8, window: ids_mod.Id },
+
+    /// The window it is about.
+    fn window(j: ModalJob) ?ids_mod.Id {
+        return switch (j) {
+            .none => null,
+            inline else => |d| d.window,
+        };
+    }
+};
+
+/// Free what a modal's job owns.
+fn freeModalJob(app: *App, job: ModalJob) void {
+    switch (job) {
+        .none => {},
+        .copy_drop => |d| {
+            app.freePaths(d.paths);
+            app.gpa.free(d.dest);
+        },
+        .paste => |d| app.gpa.free(d.dest),
+        .delete => |d| app.freePaths(d.paths),
+        .rename => |d| app.gpa.free(d.path),
+    }
+}
+
+/// Open a modal for `job` (one at a time: one already open gets its safe
+/// answer first).
+fn openModal(app: *App, spec: Modal.Spec, job: ModalJob) void {
+    if (app.modal) |m| app.resolveModal(m.safe, .replaced);
+    app.closeMenu();
+    app.closePeek();
+    app.hideTip();
+    app.modal = Modal.init(spec, c.SDL_GetTicks());
+    app.modal_job = job;
+    app.dirty = true;
+}
+
+/// How the modal's answer came: picked, no answer in time, or a newer
+/// modal took its place.
+const ModalHow = enum { picked, timeout, replaced };
+
+/// Act on the modal's answer (button `pick`) and close it.
+fn resolveModal(app: *App, pick: usize, how: ModalHow) void {
+    const job = app.modal_job;
+    // A rename with a bad name stays open (the dialog says why).
+    if (job == .rename and pick == 1 and how == .picked and !app.doRename(job.rename.path, job.rename.window)) {
+        app.dirty = true;
+        return;
+    }
+    app.modal = null;
+    app.modal_job = .none;
+    app.dirty = true;
+    defer app.freeModalJob(job);
+    switch (job) {
+        .none, .rename => {},
+        .paste => |d| {
+            if (pick != 1) return app.cancelled(if (app.file_clip_move) "move" else "copy", how);
+            const move = app.file_clip_move;
+            app.startFileOp(if (move) .move else .copy, app.file_clip.items, d.dest, d.window);
+            // Moved: the clipboard is done with (a copy can be pasted again).
+            if (move) {
+                for (app.file_clip.items) |p| app.gpa.free(p);
+                app.file_clip.clearRetainingCapacity();
+            }
+        },
+        .delete => |d| {
+            if (pick != 1) return app.cancelled("delete", how);
+            app.clearFileSel();
+            app.startFileOp(.remove, d.paths, "", d.window);
+        },
+        .copy_drop => |d| {
+            if (pick == 1) return app.startCopy(d.paths, d.dest, d.window);
+            const text = switch (how) {
+                .picked => "copy cancelled",
+                .timeout => "no answer: copy cancelled",
+                .replaced => "another drop came: copy cancelled",
+            };
+            app.say(text, app.theme.dim); // nothing done: no effect on the window
+        },
+    }
+}
+
+/// Files changed (a file action ended): every window looks for its
+/// outlined name again (a deleted one loses its outline).
+fn filesChanged(app: *App) void {
+    for (app.jobs.items) |w| _ = w.opener.clear();
+    app.sendHover();
+    app.dirty = true;
+}
+
+/// A file action done in gtty changed files: the window it was done in
+/// lists its folder again (`JobWindow.refreshListing`, setting
+/// `refresh-ls`).
+fn refreshAfter(app: *App, uid: ids_mod.Id) void {
+    const w = app.jobByUid(uid) orelse return;
+    if (w.refreshListing()) app.dirty = true;
+}
+
+/// A file action the user said no to (or didn't answer): the status bar
+/// says so; nothing on the window (nothing was done).
+fn cancelled(app: *App, what: []const u8, how: ModalHow) void {
+    var buf: [120]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{s}{s} cancelled", .{ if (how == .timeout) "no answer: " else "", what }) catch "cancelled";
+    app.say(text, app.theme.dim); // nothing done: no effect on the window
+}
+
+/// Each frame while a modal is open: redraw (the countdown); no answer
+/// in time → its safe button.
+fn tickModal(app: *App) void {
+    const m = app.modal orelse return;
+    app.dirty = true;
+    if (m.expired(c.SDL_GetTicks())) app.resolveModal(m.safe, .timeout);
+}
+
+/// Files dropped from another app on a job window: ask before copying
+/// them into `dest` (the dropped paths are taken from `drop_paths`).
+fn askCopy(app: *App, dest: []const u8) void {
+    const pt = app.mouse orelse return;
+    const i = app.windowAt(pt[0], pt[1]) orelse return;
+    const window = app.jobs.items[i].uid;
+    const dz = app.gpa.dupeZ(u8, dest) catch return;
+    const paths = app.drop_paths.toOwnedSlice(app.gpa) catch {
+        app.gpa.free(dz);
+        return;
+    };
+    var tbuf: [300]u8 = undefined;
+    var bbuf: [1024]u8 = undefined;
+    const name = std.fs.path.basename(dest);
+    const title = std.fmt.bufPrint(&tbuf, "Copy into {s}?", .{if (name.len > 0) name else "/"}) catch "Copy?";
+    var what_buf: [400]u8 = undefined;
+    const what = listNames(paths, &what_buf);
+    var sbuf: [256]u8 = undefined;
+    const home = if (c.getenv("HOME")) |h| std.mem.span(h) else "";
+    const body = std.fmt.bufPrint(&bbuf, "{s}\ninto {s}\nA name already there gets a number; nothing is overwritten.", .{ what, Menu.shortPath(&sbuf, dest, home, 60) }) catch what;
+    app.openModal(.{
+        .title = title,
+        .body = body,
+        .buttons = &.{ .{ .label = "Cancel" }, .{ .label = "Copy", .kind = .primary } },
+        .default = 1,
+        .safe = 0,
+    }, .{ .copy_drop = .{ .paths = paths, .dest = dz, .window = window } });
+}
+
+const FileOp = enum {
+    copy,
+    move,
+    remove,
+
+    fn verb(op: FileOp) []const u8 {
+        return switch (op) {
+            .copy => "copy",
+            .move => "move",
+            .remove => "delete",
+        };
+    }
+    fn ing(op: FileOp) []const u8 {
+        return switch (op) {
+            .copy => "copying",
+            .move => "moving",
+            .remove => "deleting",
+        };
+    }
+    fn done(op: FileOp) []const u8 {
+        return switch (op) {
+            .copy => "copied",
+            .move => "moved",
+            .remove => "deleted",
+        };
+    }
+};
+
+/// A copy / move / delete running in the background (gtty_copy.c).
 const Copying = struct {
     pid: c_int,
     n: usize,
+    op: FileOp = .copy,
     name_buf: [256]u8 = undefined,
     name_len: usize = 0,
+    /// The first item's name (the one named when only one is copied).
+    item_buf: [256]u8 = undefined,
+    item_len: usize = 0,
+    /// Its FileFx on the window it was dropped on.
+    fx: FxRef = .{},
+
+    fn what(cp: *const Copying, buf: []u8) []const u8 {
+        if (cp.n == 1) return cp.item_buf[0..cp.item_len];
+        return std.fmt.bufPrint(buf, "{d} items", .{cp.n}) catch "items";
+    }
 };
 
 /// Copy `paths` into folder `dest` in the background (gtty_copy: a name
 /// that is there already gets a number; nothing is overwritten).
-fn startCopy(app: *App, paths: []const [:0]u8, dest: []const u8) void {
+fn startCopy(app: *App, paths: []const [:0]u8, dest: []const u8, window: ids_mod.Id) void {
+    app.startFileOp(.copy, paths, dest, window);
+}
+
+/// Copy / move `paths` into folder `dest`, or delete them (`dest` unused),
+/// in the background (gtty_copy.c), with the window's FileFx and notices.
+fn startFileOp(app: *App, op: FileOp, paths: []const [:0]u8, dest: []const u8, window: ids_mod.Id) void {
+    if (paths.len == 0) return;
     const ptrs = app.gpa.alloc([*c]const u8, paths.len) catch return;
     defer app.gpa.free(ptrs);
     for (paths, 0..) |p, i| ptrs[i] = p.ptr;
     var dbuf: [4097]u8 = undefined;
     const dz = std.fmt.bufPrintZ(&dbuf, "{s}", .{dest}) catch return;
-    const pid = c.gtty_copy_start(ptrs.ptr, @intCast(paths.len), dz.ptr);
-    const name = std.fs.path.basename(dest);
+    const pid = switch (op) {
+        .copy => c.gtty_copy_start(ptrs.ptr, @intCast(paths.len), dz.ptr),
+        .move => c.gtty_move_start(ptrs.ptr, @intCast(paths.len), dz.ptr),
+        .remove => c.gtty_remove_start(ptrs.ptr, @intCast(paths.len)),
+    };
+    const name = if (op == .remove) "" else std.fs.path.basename(dest);
+    var fbuf: [300]u8 = undefined;
     if (pid < 0) {
         beep.beep();
-        return app.sayFmt("could not copy into {s}", .{name}, app.theme.stderr_accent);
+        const text = std.fmt.bufPrint(&fbuf, "could not {s} {s}", .{ op.verb(), name }) catch "failed";
+        app.say(text, app.theme.stderr_accent);
+        return app.finishFx(app.fxOn(window, text), .failed, text);
     }
-    var cp: Copying = .{ .pid = pid, .n = paths.len };
+    var cp: Copying = .{ .pid = pid, .n = paths.len, .op = op };
     cp.name_len = @min(name.len, cp.name_buf.len);
     @memcpy(cp.name_buf[0..cp.name_len], name[0..cp.name_len]);
+    const item = std.fs.path.basename(paths[0]);
+    cp.item_len = @min(item.len, cp.item_buf.len);
+    @memcpy(cp.item_buf[0..cp.item_len], item[0..cp.item_len]);
+    var wbuf: [32]u8 = undefined;
+    const text = (if (op == .remove)
+        std.fmt.bufPrint(&fbuf, "deleting {s}…", .{cp.what(&wbuf)})
+    else
+        std.fmt.bufPrint(&fbuf, "{s} {s} into {s}…", .{ op.ing(), cp.what(&wbuf), name })) catch "working…";
+    cp.fx = app.fxOn(window, text);
     app.copying.append(app.gpa, cp) catch {};
-    app.sayFmt("copying {d} item{s} into {s}…", .{ paths.len, if (paths.len == 1) "" else "s", name }, app.theme.dim);
+    app.say(text, app.theme.dim);
 }
 
-/// Each frame: copies that finished say so.
+/// Each frame: copies / moves / deletes that finished say so.
 fn tickCopies(app: *App) void {
     var i: usize = 0;
     while (i < app.copying.items.len) {
@@ -3944,14 +4458,676 @@ fn tickCopies(app: *App) void {
             continue;
         }
         _ = app.copying.swapRemove(i);
+        app.filesChanged();
         const name = cp.name_buf[0..cp.name_len];
+        var fbuf: [300]u8 = undefined;
+        var wbuf: [32]u8 = undefined;
         if (r == 0) {
-            app.sayFmt("copied {d} item{s} into {s}", .{ cp.n, if (cp.n == 1) "" else "s", name }, app.theme.ok);
+            const text = (if (cp.op == .remove)
+                std.fmt.bufPrint(&fbuf, "deleted {s}", .{cp.what(&wbuf)})
+            else
+                std.fmt.bufPrint(&fbuf, "{s} {s} into {s}", .{ cp.op.done(), cp.what(&wbuf), name })) catch "done";
+            app.say(text, app.theme.ok);
+            app.finishFx(cp.fx, .ok, text);
+            app.refreshAfter(cp.fx.window);
         } else {
             beep.beep();
-            app.sayFmt("copy into {s}: {d} of {d} failed", .{ name, @min(@as(usize, @intCast(r)), cp.n), cp.n }, app.theme.stderr_accent);
+            const failed = @min(@as(usize, @intCast(r)), cp.n);
+            if (failed < cp.n) app.refreshAfter(cp.fx.window); // some were done
+            const text = (if (cp.op == .remove)
+                std.fmt.bufPrint(&fbuf, "delete: {d} of {d} failed", .{ failed, cp.n })
+            else
+                std.fmt.bufPrint(&fbuf, "{s} into {s}: {d} of {d} failed", .{ cp.op.verb(), name, failed, cp.n })) catch "failed";
+            app.say(text, app.theme.stderr_accent);
+            app.finishFx(cp.fx, .failed, text);
         }
     }
+}
+
+/// A file dragged out of gtty: once the drag ended, look for it every
+/// 100 ms for 2 s; gone (the target moved it) → say so on its window.
+fn tickDragOut(app: *App) void {
+    const d = &(app.drag_out orelse return);
+    if (c.gtty_drag_active()) return;
+    const now = c.SDL_GetTicks();
+    if (d.ended_ms == 0) d.ended_ms = now;
+    if (now < d.next_ms) return;
+    d.next_ms = now + 100;
+    const path = app.drag_path orelse {
+        app.drag_out = null;
+        return;
+    };
+    if (std.c.access(path.ptr, std.c.F_OK) != 0) {
+        const uid = d.window;
+        app.drag_out = null;
+        const w = app.jobByUid(uid) orelse return;
+        var fbuf: [200]u8 = undefined;
+        const from = std.fs.path.basename(std.fs.path.dirname(path) orelse "/");
+        const text = std.fmt.bufPrint(&fbuf, "moved {s} out of {s}", .{ std.fs.path.basename(path), if (from.len > 0) from else "/" }) catch "moved out";
+        app.finishFx(app.newFx(w, text), .ok, text);
+        app.sayFmt("{s}", .{text}, app.theme.dim);
+        app.refreshAfter(uid);
+        return;
+    }
+    if (now -| d.ended_ms > 2000) app.drag_out = null;
+}
+
+/// A FileFx on a job window: which one, and which of its effects (a
+/// later one replaces it).
+const FxRef = struct { window: ids_mod.Id = 0, id: u32 = 0 };
+
+/// A FileFx (working) on window `w`.
+fn newFx(app: *App, w: *JobWindow, text: []const u8) FxRef {
+    const id = app.fx_next_id;
+    app.fx_next_id +%= 1;
+    if (app.fx_next_id == 0) app.fx_next_id = 1;
+    w.file_fx = FileFx.init(id, c.SDL_GetTicks(), text);
+    app.dirty = true;
+    return .{ .window = w.uid, .id = id };
+}
+
+/// A FileFx (working) on job window `uid` (gone: an empty ref).
+fn fxOn(app: *App, uid: ids_mod.Id, text: []const u8) FxRef {
+    const w = app.jobByUid(uid) orelse return .{};
+    return app.newFx(w, text);
+}
+
+fn finishFx(app: *App, ref: FxRef, state: FileFx.State, text: []const u8) void {
+    const w = app.jobByUid(ref.window) orelse return;
+    const f = if (w.file_fx) |*f| f else return;
+    if (f.id != ref.id) return;
+    f.finish(state, text, c.SDL_GetTicks());
+    app.dirty = true;
+}
+
+// ------------------------------------------------------------ file actions
+
+/// A ⌘-clicked (Ctrl-clicked on Linux) file or folder name: the window,
+/// where in its text, and the file (owned).
+const FileSel = struct {
+    window: ids_mod.Id,
+    range: Screen.TextRange,
+    path: [:0]u8,
+};
+
+/// The right-click file menu's rows (`Menu.codes`).
+/// The file menu's "cd <folder>": at most this many characters of the name.
+const cd_label_max = 16;
+const file_open = 0;
+const file_open_with = 1;
+const file_cd = 2;
+const file_reveal = 3;
+const file_rename = 4;
+const file_copy = 5;
+const file_cut = 6;
+const file_paste = 7;
+const file_trash = 8;
+const file_delete = 9;
+const file_copy_name = 10;
+
+const sel_mod_name = if (builtin.os.tag == .macos) "⌘" else "Ctrl";
+const file_keys = if (builtin.os.tag == .macos) struct {
+    const copy = "⌘C";
+    const cut = "⌘X";
+    const paste = "⌘V";
+    const trash = "⌘⌫";
+    const delete = "⌫";
+} else struct {
+    const copy = "Ctrl+Shift+C";
+    const cut = "Ctrl+Shift+X";
+    const paste = "Ctrl+Shift+V";
+    const trash = "Ctrl+Delete";
+    const delete = "Delete";
+};
+
+/// The mouse "has" the file under it: it moved (or clicked) after the
+/// last key. Then file shortcuts act on that name; while typing (the
+/// mouse resting on a name) the keys stay the job's.
+fn pointerFresh(app: *const App) bool {
+    return app.last_point_ms > app.last_key_ms;
+}
+
+/// The outlined local name under the mouse, and its window.
+fn markUnderMouse(app: *App) ?struct { w: *JobWindow, m: *FileOpener.Mark } {
+    const pt = app.mouse orelse return null;
+    const i = app.textWindowAt(pt[0], pt[1]) orelse return null;
+    const w = app.jobs.items[i];
+    const m = w.fileMarkAt(pt[0], pt[1]) orelse return null;
+    if (m.remote) return null;
+    return .{ .w = w, .m = m };
+}
+
+fn inFileSel(app: *const App, path: []const u8) ?usize {
+    for (app.file_sel.items, 0..) |f, i| if (std.mem.eql(u8, f.path, path)) return i;
+    return null;
+}
+
+fn clearFileSel(app: *App) void {
+    if (app.file_sel.items.len == 0) return;
+    for (app.file_sel.items) |f| app.gpa.free(f.path);
+    app.file_sel.clearRetainingCapacity();
+    app.dirty = true;
+}
+
+/// ⌘-click (Ctrl-click) on a name: add it to the selection, or take it
+/// out.
+fn toggleFileSel(app: *App, w: *JobWindow, m: *const FileOpener.Mark) void {
+    app.dirty = true;
+    if (app.inFileSel(m.file())) |i| {
+        app.gpa.free(app.file_sel.orderedRemove(i).path);
+    } else {
+        const p = app.gpa.dupeZ(u8, m.file()) catch return;
+        app.file_sel.append(app.gpa, .{ .window = w.uid, .range = m.range, .path = p }) catch app.gpa.free(p);
+    }
+    const n = app.file_sel.items.len;
+    if (n == 0) return app.say("nothing selected", app.theme.dim);
+    app.sayFmt("{d} selected  ({s}+click adds / removes; right-click one for the actions)", .{ n, sel_mod_name }, app.theme.dim);
+}
+
+/// The files an action is for: the selection when `at` (the name the
+/// action was asked on) is in it or there is no such name, else just
+/// `at`. Owned (free with `freePaths`); null: none.
+fn fileTargets(app: *App, at: ?[]const u8) ?[][:0]u8 {
+    const use_sel = app.file_sel.items.len > 0 and (at == null or app.inFileSel(at.?) != null);
+    const n = if (use_sel) app.file_sel.items.len else if (at != null) @as(usize, 1) else return null;
+    const out = app.gpa.alloc([:0]u8, n) catch return null;
+    var k: usize = 0;
+    errdefer {
+        for (out[0..k]) |p| app.gpa.free(p);
+        app.gpa.free(out);
+    }
+    if (use_sel) {
+        for (app.file_sel.items) |f| {
+            out[k] = app.gpa.dupeZ(u8, f.path) catch return null;
+            k += 1;
+        }
+    } else {
+        out[0] = app.gpa.dupeZ(u8, at.?) catch return null;
+        k = 1;
+    }
+    return out;
+}
+
+fn freePaths(app: *App, paths: [][:0]u8) void {
+    for (paths) |p| app.gpa.free(p);
+    app.gpa.free(paths);
+}
+
+/// The names of `paths` on one line: "a.txt" or "3 items: a.txt, b.txt, …".
+fn listNames(paths: []const [:0]u8, buf: []u8) []const u8 {
+    if (paths.len == 1) return std.fs.path.basename(paths[0]);
+    const head = std.fmt.bufPrint(buf, "{d} items: ", .{paths.len}) catch return "items";
+    var n = head.len;
+    for (paths, 0..) |p, k| {
+        const b = std.fs.path.basename(p);
+        const sep: []const u8 = if (k == 0) "" else ", ";
+        if (n + sep.len + b.len + 1 > 60) {
+            const more = "…";
+            if (n + more.len <= buf.len) {
+                @memcpy(buf[n..][0..more.len], more);
+                n += more.len;
+            }
+            break;
+        }
+        @memcpy(buf[n..][0..sep.len], sep);
+        n += sep.len;
+        @memcpy(buf[n..][0..b.len], b);
+        n += b.len;
+    }
+    return buf[0..n];
+}
+
+/// "notes.txt" or "3 items".
+fn whatPaths(paths: []const [:0]u8, buf: []u8) []const u8 {
+    if (paths.len == 1) return std.fs.path.basename(paths[0]);
+    return std.fmt.bufPrint(buf, "{d} items", .{paths.len}) catch "items";
+}
+
+/// Copy (`move` false) or cut: the files go on gtty's file clipboard,
+/// waiting for a paste (⌘V over a folder name or a window, or the file
+/// menu's Paste). The names flash (`single`: the one name, in `w`; else
+/// the ⌘-clicked ones).
+fn fileClip(app: *App, paths: [][:0]u8, move: bool, w: ?*JobWindow, single: ?Screen.TextRange) void {
+    app.flashTargets(paths.len, w, single);
+    for (app.file_clip.items) |p| app.gpa.free(p);
+    app.file_clip.clearRetainingCapacity();
+    for (paths) |p| app.file_clip.append(app.gpa, p) catch app.gpa.free(p);
+    app.gpa.free(paths);
+    app.file_clip_move = move;
+    app.clearFileSel();
+    var wbuf: [32]u8 = undefined;
+    var fbuf: [300]u8 = undefined;
+    const text = std.fmt.bufPrint(&fbuf, "{s} {s}: select a destination, {s} pastes", .{
+        if (move) "moving" else "copy",
+        whatPaths(app.file_clip.items, &wbuf),
+        file_keys.paste,
+    }) catch "select a destination";
+    app.say(text, app.theme.prompt_fg);
+}
+
+/// Copy Name (file menu) or a single click on an outlined name: the
+/// names, as text, on the clipboard and the paste history (one per line
+/// when several). The names flash (`single`: the one name, in `w`; else
+/// the ⌘-clicked ones). Being text, it is now what Paste pastes.
+fn copyNames(app: *App, paths: anytype, w: ?*JobWindow, single: ?Screen.TextRange) void {
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(app.gpa);
+    for (paths, 0..) |p, i| {
+        if (i > 0) text.append(app.gpa, '\n') catch return;
+        const name = std.fs.path.basename(p);
+        text.appendSlice(app.gpa, if (name.len > 0) name else p) catch return;
+    }
+    text.append(app.gpa, 0) catch return;
+    const z = text.items[0 .. text.items.len - 1 :0];
+    if (z.len == 0) return;
+    app.flashTargets(paths.len, w, single);
+    app.clearFileSel();
+    app.pushPasteHistory(z);
+    _ = c.SDL_SetClipboardText(z.ptr);
+    var wbuf: [32]u8 = undefined;
+    var nbuf: [100]u8 = undefined;
+    const what = if (paths.len == 1) Menu.oneLine(&nbuf, z, 40) else std.fmt.bufPrint(&wbuf, "{d} names", .{paths.len}) catch "names";
+    app.sayFmt("copied {s}", .{what}, app.theme.ok);
+}
+
+/// An action done with no dialog (copy, cut, trash): flash the names it
+/// took (`single`: the one name, in `w`; else the ⌘-clicked ones), the
+/// only sign on screen that it happened.
+fn flashTargets(app: *App, n: usize, w: ?*JobWindow, single: ?Screen.TextRange) void {
+    if (n == 1 and single != null and w != null) w.?.flashNames(&.{single.?}) else app.flashFileSel();
+    app.dirty = true;
+}
+
+/// Flash the ⌘-clicked names, on each window that has some.
+fn flashFileSel(app: *App) void {
+    for (app.jobs.items) |w| {
+        var ranges: [16]Screen.TextRange = undefined;
+        var n: usize = 0;
+        for (app.file_sel.items) |f| if (f.window == w.uid and n < ranges.len) {
+            ranges[n] = f.range;
+            n += 1;
+        };
+        if (n > 0) w.flashNames(ranges[0..n]);
+    }
+}
+
+/// Where a paste at the mouse goes: the folder name under it, else the
+/// folder of the window there (in `buf`).
+fn pasteDest(app: *App, buf: []u8) ?struct { dest: []const u8, w: *JobWindow } {
+    const pt = app.mouse orelse return null;
+    const i = app.textWindowAt(pt[0], pt[1]) orelse return null;
+    const w = app.jobs.items[i];
+    var rbuf: [4096]u8 = undefined;
+    if (w.remoteNow(&rbuf) != null) return null;
+    if (w.fileMarkAt(pt[0], pt[1])) |m| if (m.folder and !m.remote) {
+        const n = @min(m.len, buf.len);
+        @memcpy(buf[0..n], m.buf[0..n]);
+        return .{ .dest = buf[0..n], .w = w };
+    };
+    const d = w.folder(buf);
+    return if (d.len > 0) .{ .dest = d, .w = w } else null;
+}
+
+/// Paste the file clipboard into `dest`: ask first (Enter = OK, Esc /
+/// no answer = nothing done).
+fn askPaste(app: *App, dest: []const u8, w: *JobWindow) void {
+    if (app.file_clip.items.len == 0) return;
+    const move = app.file_clip_move;
+    if (move) {
+        const all_there = for (app.file_clip.items) |p| {
+            if (!alreadyIn(p, dest)) break false;
+        } else true;
+        if (all_there) {
+            return app.say("already in this folder: nothing to move", app.theme.dim);
+        }
+    }
+    const dz = app.gpa.dupeZ(u8, dest) catch return;
+    var tbuf: [300]u8 = undefined;
+    var bbuf: [1024]u8 = undefined;
+    var sbuf: [256]u8 = undefined;
+    const home = if (c.getenv("HOME")) |h| std.mem.span(h) else "";
+    const name = std.fs.path.basename(dest);
+    const title = std.fmt.bufPrint(&tbuf, "{s} into {s}?", .{ if (move) "Move" else "Copy", if (name.len > 0) name else "/" }) catch "Paste?";
+    var lbuf: [400]u8 = undefined;
+    const body = std.fmt.bufPrint(&bbuf, "{s}\ninto {s}\nA name already there gets a number; nothing is overwritten.", .{
+        listNames(app.file_clip.items, &lbuf),
+        Menu.shortPath(&sbuf, dest, home, 60),
+    }) catch "";
+    app.openModal(.{
+        .title = title,
+        .body = body,
+        .buttons = &.{ .{ .label = "Cancel" }, .{ .label = if (move) "Move" else "Copy", .kind = .primary } },
+        .default = 1,
+        .safe = 0,
+    }, .{ .paste = .{ .dest = dz, .window = w.uid } });
+}
+
+/// Delete for good: ask first (Enter = Delete, Esc / no answer = nothing).
+fn askDelete(app: *App, paths: [][:0]u8, w: *JobWindow) void {
+    var tbuf: [300]u8 = undefined;
+    var bbuf: [512]u8 = undefined;
+    var wbuf: [32]u8 = undefined;
+    var folders = false;
+    for (paths) |p| if (FileOpener.kindOf(p) == .folder) {
+        folders = true;
+    };
+    const title = std.fmt.bufPrint(&tbuf, "Delete {s}?", .{whatPaths(paths, &wbuf)}) catch "Delete?";
+    var lbuf: [400]u8 = undefined;
+    const body = std.fmt.bufPrint(&bbuf, "{s}\n{s} deleted for good, not moved to the trash{s}.", .{
+        listNames(paths, &lbuf),
+        if (paths.len == 1) "It is" else "They are",
+        if (folders) " (a folder with everything in it)" else "",
+    }) catch "";
+    app.openModal(.{
+        .title = title,
+        .body = body,
+        .buttons = &.{ .{ .label = "Cancel" }, .{ .label = "Delete", .kind = .danger } },
+        .default = 1,
+        .safe = 0,
+    }, .{ .delete = .{ .paths = paths, .window = w.uid } });
+}
+
+/// Rename: a field over the name, the name selected up to its last dot.
+fn askRename(app: *App, path: []const u8, w: *JobWindow, anchor: ?Rect) void {
+    const pz = app.gpa.dupeZ(u8, path) catch return;
+    var tbuf: [300]u8 = undefined;
+    const title = std.fmt.bufPrint(&tbuf, "Rename {s}", .{std.fs.path.basename(path)}) catch "Rename";
+    app.openModal(.{
+        .title = title,
+        .body = "Enter renames · Esc leaves it as it is",
+        .buttons = &.{ .{ .label = "Cancel" }, .{ .label = "Rename", .kind = .primary } },
+        .default = 1,
+        .safe = 0,
+        .input = std.fs.path.basename(path),
+        .select_stem = true,
+        .anchor = anchor,
+    }, .{ .rename = .{ .path = pz, .window = w.uid } });
+}
+
+/// The rename's new name, if it is a good one: done (true), or an error
+/// shown in the dialog (false, it stays open).
+fn doRename(app: *App, path: []const u8, window: ids_mod.Id) bool {
+    const m = &(app.modal orelse return true);
+    var nbuf: [1024]u8 = undefined;
+    const name = std.mem.trim(u8, m.inputText(&nbuf), " ");
+    const now = c.SDL_GetTicks();
+    if (name.len == 0) {
+        m.setError("a name can't be empty", now);
+        return false;
+    }
+    if (std.mem.indexOfScalar(u8, name, '/') != null or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) {
+        m.setError("a name can't have / in it, or be . or ..", now);
+        return false;
+    }
+    const old = std.fs.path.basename(path);
+    if (std.mem.eql(u8, name, old)) return true;
+    const dir = std.fs.path.dirname(path) orelse "/";
+    var tbuf: [4097]u8 = undefined;
+    const to = std.fmt.bufPrintZ(&tbuf, "{s}/{s}", .{ std.mem.trimEnd(u8, dir, "/"), name }) catch {
+        m.setError("that name is too long", now);
+        return false;
+    };
+    var st: c.struct_stat = undefined;
+    // Only a change of case is the same file on a case-insensitive disk.
+    if (c.lstat(to.ptr, &st) == 0 and !std.ascii.eqlIgnoreCase(name, old)) {
+        var ebuf: [300]u8 = undefined;
+        m.setError(std.fmt.bufPrint(&ebuf, "{s} is already there", .{name}) catch "that name is already there", now);
+        return false;
+    }
+    var fbuf: [4097]u8 = undefined;
+    const from = std.fmt.bufPrintZ(&fbuf, "{s}", .{path}) catch return true;
+    var mbuf: [600]u8 = undefined;
+    if (c.rename(from.ptr, to.ptr) != 0) {
+        beep.beep();
+        const text = std.fmt.bufPrint(&mbuf, "could not rename {s}", .{old}) catch "could not rename";
+        app.say(text, app.theme.stderr_accent);
+        app.finishFx(app.fxOn(window, text), .failed, text);
+        return true;
+    }
+    app.filesChanged();
+    const text = std.fmt.bufPrint(&mbuf, "renamed {s} to {s}", .{ old, name }) catch "renamed";
+    app.say(text, app.theme.ok);
+    app.finishFx(app.fxOn(window, text), .ok, text);
+    app.refreshAfter(window);
+    return true;
+}
+
+/// Move to the trash (no question: the trash gives it back).
+fn fileTrash(app: *App, paths: [][:0]u8, w: *JobWindow, single: ?Screen.TextRange) void {
+    defer app.freePaths(paths);
+    var failed: usize = 0;
+    for (paths) |p| if (c.gtty_trash(p.ptr) != 0) {
+        failed += 1;
+    };
+    if (failed == 0) app.flashTargets(paths.len, w, single);
+    if (failed < paths.len) app.refreshAfter(w.uid);
+    app.clearFileSel();
+    app.filesChanged();
+    var wbuf: [32]u8 = undefined;
+    var fbuf: [300]u8 = undefined;
+    if (failed == 0) {
+        const text = std.fmt.bufPrint(&fbuf, "moved {s} to the trash", .{whatPaths(paths, &wbuf)}) catch "moved to the trash";
+        app.say(text, app.theme.ok); // the names flashed
+    } else {
+        beep.beep();
+        const text = std.fmt.bufPrint(&fbuf, "trash: {d} of {d} failed", .{ failed, paths.len }) catch "trash failed";
+        app.say(text, app.theme.stderr_accent);
+        app.finishFx(app.newFx(w, text), .failed, text);
+    }
+}
+
+/// File shortcuts while the mouse has a name (`pointerFresh`) or names
+/// are selected: ⌘X cut, F2 rename, ⌫ / Delete delete (asks), ⌘⌫ (Linux
+/// Ctrl+Delete) to the trash. ⌘C / ⌘V: in copySelection / pasteKey.
+/// True: the key was used.
+fn fileKey(app: *App, key: c.SDL_Keycode, ctrl: bool, cmd: bool, alt: bool, shift: bool) bool {
+    if (!FileOpener.enabled or !app.pointerFresh()) return false;
+    const under = app.markUnderMouse();
+    if (under == null and app.file_sel.items.len == 0) return false;
+    const w = if (under) |u| u.w else app.jobByUid(app.file_sel.items[0].window) orelse return false;
+    const at: ?[]const u8 = if (under) |u| u.m.file() else null;
+    const trash_key = if (builtin.os.tag == .macos) key == c.SDLK_BACKSPACE and cmd and !ctrl and !alt else key == c.SDLK_DELETE and ctrl and !shift and !alt;
+    const plain = !ctrl and !cmd and !alt;
+    if (trash_key) {
+        if (!c.gtty_trash_supported()) return false;
+        const paths = app.fileTargets(at) orelse return false;
+        app.fileTrash(paths, w, if (under) |u| u.m.range else null);
+        return true;
+    }
+    if (key == c.SDLK_X and (cmd or (ctrl and shift))) {
+        const paths = app.fileTargets(at) orelse return false;
+        app.fileClip(paths, true, w, if (under) |u| u.m.range else null);
+        return true;
+    }
+    if (key == c.SDLK_F2 and plain and !shift) {
+        const u = under orelse return false;
+        var rects: [8]Rect = undefined;
+        const rs = u.w.rangeRects(u.m.range, &rects);
+        app.askRename(u.m.file(), u.w, if (rs.len > 0) rs[0] else null);
+        return true;
+    }
+    if ((key == c.SDLK_BACKSPACE or key == c.SDLK_DELETE) and plain and !shift) {
+        const paths = app.fileTargets(at) orelse return false;
+        app.askDelete(paths, w);
+        return true;
+    }
+    return false;
+}
+
+/// ⌘C with no text selected: copy the selected names, or the one the
+/// mouse has. True: done.
+fn fileCopyKey(app: *App) bool {
+    if (!FileOpener.enabled or app.hasSelection()) return false;
+    const under = app.markUnderMouse();
+    if (app.file_sel.items.len == 0 and (under == null or !app.pointerFresh())) return false;
+    const at: ?[]const u8 = if (under) |u| u.m.file() else null;
+    const paths = app.fileTargets(at) orelse return false;
+    const w = if (under) |u| u.w else app.jobByUid(app.file_sel.items[0].window);
+    app.fileClip(paths, false, w, if (under) |u| u.m.range else null);
+    return true;
+}
+
+/// ⌘V with files on gtty's file clipboard and the mouse on a window's
+/// text: paste them there (asks). True: done.
+fn filePasteKey(app: *App) bool {
+    if (app.file_clip.items.len == 0 or !app.pointerFresh()) return false;
+    var buf: [4096]u8 = undefined;
+    const d = app.pasteDest(&buf) orelse return false;
+    app.askPaste(d.dest, d.w);
+    return true;
+}
+
+/// Right click on an outlined local name: the file menu (for the
+/// selection when the name is in it). False: not on such a name.
+fn openFileMenu(app: *App, x: f32, y: f32) bool {
+    if (!FileOpener.enabled) return false;
+    const i = app.textWindowAt(x, y) orelse return false;
+    const w = app.jobs.items[i];
+    const m = w.fileMarkAt(x, y) orelse return false;
+    if (m.remote) return false;
+    const paths = app.fileTargets(m.file()) orelse return false;
+    app.closeMenu();
+    app.freeMenuFiles();
+    // Where Paste goes: into the folder clicked, else the window's folder.
+    var dbuf: [4096]u8 = undefined;
+    const dest = if (m.folder) m.file() else w.folder(&dbuf);
+    app.menu_dest = app.gpa.dupeZ(u8, dest) catch null;
+    var rects: [8]Rect = undefined;
+    const rs = w.rangeRects(m.range, &rects);
+    app.menu_anchor = if (rs.len > 0) rs[0] else null;
+    app.menu_range = m.range;
+    app.menu_files = paths;
+    const one = paths.len == 1;
+    const folder = one and FileOpener.kindOf(paths[0]) == .folder;
+    var menu: Menu = .{ .purpose = .{ .files = w.uid }, .at = .{ x, y } };
+    // No title: the menu opens at the name it is about.
+    if (one and !folder) {
+        // One row: "Open with <default app>" (its icon; ▸ the other apps
+        // and Other…), or, with no default app, "Open With…" (a click:
+        // the system's app chooser).
+        _ = app.loadPicker(paths[0]);
+        if (app.pickerDefault()) |d| {
+            const a = &app.picker_apps[d];
+            const label = std.fmt.bufPrint(&app.open_label, "Open with {s}", .{std.mem.sliceTo(&a.name, 0)}) catch "Open";
+            menu.addCode(.{ .label = label, .icon = app.picker_icons[d], .sub = true, .sub_on = true }, file_open);
+        } else {
+            menu.addCode(.{ .label = "Open With…" }, file_open_with);
+        }
+    }
+    if (folder) {
+        // "cd <the folder's name>", a long name cut with ….
+        var nbuf: [cd_label_max * 4 + 4]u8 = undefined;
+        const name = Menu.oneLine(&nbuf, std.fs.path.basename(paths[0]), cd_label_max);
+        const label = std.fmt.bufPrint(&app.menu_cd_label, "cd {s}", .{name}) catch "cd";
+        menu.addCode(.{ .label = label, .enabled = w.atPrompt() and w.sync != .follower }, file_cd);
+        menu.addCode(.{ .label = if (builtin.os.tag == .macos) "Open in Finder" else "Open in Files" }, file_reveal);
+    }
+    menu.addCode(.{ .label = "Rename…", .key = "F2", .enabled = one }, file_rename);
+    menu.addCode(.{ .label = "Copy", .key = file_keys.copy }, file_copy);
+    menu.addCode(.{ .label = if (one) "Copy Name" else "Copy Names" }, file_copy_name);
+    menu.addCode(.{ .label = "Cut", .key = file_keys.cut }, file_cut);
+    // Paste: what was copied last. Files go into the folder clicked (else
+    // the window's); text is typed into the window's job.
+    const paste_ok = if (app.file_clip.items.len > 0)
+        app.menu_dest != null
+    else
+        w.running() and w.sync != .follower and c.SDL_HasClipboardText();
+    menu.addCode(.{ .label = "Paste", .key = file_keys.paste, .enabled = paste_ok }, file_paste);
+    if (c.gtty_trash_supported()) menu.addCode(.{ .label = "Move to Trash", .key = file_keys.trash }, file_trash);
+    menu.addCode(.{ .label = "Delete…", .key = file_keys.delete }, file_delete);
+    app.popMenu(menu);
+    return true;
+}
+
+fn freeMenuFiles(app: *App) void {
+    if (app.menu_files) |p| app.freePaths(p);
+    app.menu_files = null;
+    if (app.menu_dest) |d| app.gpa.free(d);
+    app.menu_dest = null;
+}
+
+/// A row of the file menu.
+fn fileMenuPick(app: *App, uid: ids_mod.Id, code: i32) void {
+    const paths = app.menu_files orelse return;
+    app.menu_files = null; // taken over here
+    const w = app.jobByUid(uid) orelse return app.freePaths(paths);
+    switch (code) {
+        file_open => {
+            defer app.freePaths(paths);
+            app.execGtty(.{ .show = .{ .path = paths[0], .pick = false } });
+        },
+        // No default app: the system's app chooser.
+        file_open_with => {
+            defer app.freePaths(paths);
+            app.chooseApp(paths[0]);
+        },
+        file_cd => {
+            defer app.freePaths(paths);
+            if (w.atPrompt()) w.cdTo(paths[0]);
+        },
+        file_reveal => {
+            defer app.freePaths(paths);
+            if (c.getenv("GTTY_SHOW_DRY") != null) return app.sayFmt("would open {s}", .{paths[0]}, app.theme.dim);
+            if (c.gtty_open_with(paths[0].ptr, null) != 0) {
+                beep.beep();
+                app.say("could not open the folder", app.theme.stderr_accent);
+            }
+        },
+        file_rename => {
+            defer app.freePaths(paths);
+            app.askRename(paths[0], w, app.menu_anchor);
+        },
+        file_copy, file_cut => app.fileClip(paths, code == file_cut, w, app.menu_range),
+        file_copy_name => {
+            defer app.freePaths(paths);
+            app.copyNames(paths, w, app.menu_range);
+        },
+        file_paste => {
+            defer app.freePaths(paths);
+            if (app.file_clip.items.len > 0) {
+                if (app.menu_dest) |d| app.askPaste(d, w);
+            } else if (w.running()) app.pasteInto(w);
+        },
+        file_trash => app.fileTrash(paths, w, app.menu_range),
+        file_delete => app.askDelete(paths, w),
+        else => app.freePaths(paths),
+    }
+}
+
+/// The ⌘-clicked names: a light box over each (windows area only).
+fn drawFileSel(app: *App) void {
+    for (app.file_sel.items) |f| {
+        const w = app.jobByUid(f.window) orelse continue;
+        const i = app.indexOfWindow(w) orelse continue;
+        if (!app.isShown(i) or w.anim_from != null or w.grid_r != null) continue;
+        if (app.maximizedShown()) |m| if (m != i) continue;
+        var rects: [8]Rect = undefined;
+        app.gfx.clip(w.out_r);
+        defer app.gfx.clip(null);
+        for (w.rangeRects(f.range, &rects)) |r| {
+            app.gfx.fillAlpha(r, app.theme.focus, 70);
+            app.gfx.outline(r, app.theme.focus, @max(@round(app.scale.ui), 1));
+        }
+    }
+}
+
+/// The status line while files wait on gtty's file clipboard.
+fn clipHelp(app: *App, buf: []u8) []const u8 {
+    if (app.file_clip.items.len == 0) return "";
+    var wbuf: [32]u8 = undefined;
+    return std.fmt.bufPrint(buf, "{s} {s}: {s} over a folder name or a window pastes there", .{
+        if (app.file_clip_move) "moving" else "copy",
+        whatPaths(app.file_clip.items, &wbuf),
+        file_keys.paste,
+    }) catch "";
+}
+
+/// Folder coloring turned on / off (settings): new output follows; off
+/// also takes the blue off the names already colored.
+fn setColorFolders(app: *App, on: bool) void {
+    JobWindow.color_folders = on;
+    if (!on) for (app.jobs.items) |w| w.out.clearNames();
+    app.dirty = true;
 }
 
 /// The file opener turned on / off (settings): every window drops its
@@ -4211,8 +5387,190 @@ fn drawTip(app: *App) void {
     app.tip_drawn = true;
 }
 
+// ------------------------------------------------------------ link hover
+
+const LinkHover = struct {
+    window: ids_mod.Id,
+    range: Screen.TextRange,
+    target: [4096]u8 = undefined,
+    target_len: usize = 0,
+    folder: bool,
+    broken: bool,
+    since: u64,
+    /// Where the box was drawn (null: not shown yet).
+    box: ?Rect = null,
+    /// The mouse left the name and the box (0: it is on one): the box
+    /// stays `link_grace_ms` more, time to reach it.
+    leave_ms: u64 = 0,
+
+    fn targetPath(h: *const LinkHover) []const u8 {
+        return h.target[0..h.target_len];
+    }
+
+    /// The folder a click cd's to: the target itself when it is a
+    /// folder, else the one the target is in.
+    fn cdDir(h: *const LinkHover) []const u8 {
+        if (h.folder and !h.broken) return h.targetPath();
+        return std.fs.path.dirname(h.targetPath()) orelse "/";
+    }
+};
+
+/// How long a shown link box waits for the mouse after it left the name
+/// (on its way to the box, over the gap or other names).
+const link_grace_ms: u64 = 1500;
+
+/// Mouse moved: the link name under it (a new one starts the delay), or
+/// the box itself keeps it. A shown box the mouse left stays
+/// `link_grace_ms` (`tickLinkHover` hides it); one not shown yet goes.
+fn updateLinkHover(app: *App, x: f32, y: f32, blocked: bool) void {
+    if (app.link_hover) |*h| if (h.box) |b| {
+        // The box, with the arrow's gap around it.
+        const m = @round(10 * app.scale.ui);
+        if (x >= b.x - m and x < b.x + b.w + m and y >= b.y - m and y < b.y + b.h + m) {
+            h.leave_ms = 0;
+            return;
+        }
+    };
+    const found: ?struct { w: *JobWindow, l: *const JobWindow.Link } = blk: {
+        if (blocked or app.modal != null or app.peek != null) break :blk null;
+        const i = app.textWindowAt(x, y) orelse break :blk null;
+        if (!app.isShown(i)) break :blk null;
+        const w = app.jobs.items[i];
+        const l = w.linkAt(x, y) orelse break :blk null;
+        break :blk .{ .w = w, .l = l };
+    };
+    if (app.link_hover) |*h| {
+        const same = if (found) |f| h.window == f.w.uid and std.meta.eql(h.range, f.l.range) else false;
+        if (same) {
+            h.leave_ms = 0;
+            return;
+        }
+        // Shown: give the mouse time to reach it (another name on the
+        // way doesn't take over).
+        if (h.box != null and !blocked) {
+            if (h.leave_ms == 0) h.leave_ms = c.SDL_GetTicks();
+            return;
+        }
+    }
+    const f = found orelse return app.hideLinkHover();
+    app.hideLinkHover();
+    var h: LinkHover = .{ .window = f.w.uid, .range = f.l.range, .folder = f.l.folder, .broken = f.l.broken, .since = c.SDL_GetTicks() };
+    h.target_len = @min(f.l.target.len, h.target.len);
+    @memcpy(h.target[0..h.target_len], f.l.target[0..h.target_len]);
+    app.link_hover = h;
+}
+
+/// Each frame: a shown box the mouse left long enough ago goes (the
+/// mouse may be over another link name by then: that one starts).
+fn tickLinkHover(app: *App) void {
+    const h = app.link_hover orelse return;
+    if (h.leave_ms == 0 or c.SDL_GetTicks() -| h.leave_ms < link_grace_ms) return;
+    app.hideLinkHover();
+    if (app.mouse) |pt| app.updateLinkHover(pt[0], pt[1], false);
+}
+
+fn hideLinkHover(app: *App) void {
+    if (app.link_hover) |h| if (h.box != null) {
+        app.dirty = true;
+    };
+    app.link_hover = null;
+}
+
+/// A click on the link box: cd to the folder the target is in (the shell
+/// at its prompt), else say why not.
+fn linkHoverClick(app: *App) void {
+    const h = app.link_hover orelse return;
+    app.hideLinkHover();
+    const w = app.jobByUid(h.window) orelse return;
+    const dir = h.cdDir();
+    if (w.sync == .follower) return app.readOnly(w);
+    if (!w.atPrompt()) {
+        beep.beep();
+        return app.say("the shell is busy", app.theme.stderr_accent);
+    }
+    var dbuf: [4096]u8 = undefined;
+    const ddir = w.folder(&dbuf);
+    if (std.mem.eql(u8, std.mem.trimEnd(u8, ddir, "/"), std.mem.trimEnd(u8, dir, "/"))) {
+        return app.say("already there", app.theme.dim);
+    }
+    w.cdTo(dir);
+    if (app.indexOfWindow(w)) |i| app.setFocus(i);
+    app.sayFmt("cd {s}", .{dir}, app.theme.dim);
+}
+
+/// The link box, over the name (under it when there is no room above),
+/// with a small arrow pointing at it, kept inside gtty's window: the
+/// name's target ("→ /real/path") and what a click does.
+fn drawLinkHover(app: *App) void {
+    const h = if (app.link_hover) |*hp| hp else return;
+    if (c.SDL_GetTicks() -| h.since < app.tip_delay_ms) return;
+    // Its window gone, moved, or the name out of view: no box.
+    const w = app.jobByUid(h.window) orelse return app.hideLinkHover();
+    if (w.anim_from != null or w.grid_r != null) return app.hideLinkHover();
+    var rects: [8]Rect = undefined;
+    const rs = w.rangeRects(h.range, &rects);
+    if (rs.len == 0) return app.hideLinkHover();
+    const name_r = rs[0];
+    const ui = app.scale.ui;
+    const f, _ = app.promptFaces();
+    const small = app.statusFace();
+    const pad = @round(8 * ui);
+    const gap = @round(4 * ui);
+    const arrow = @round(6 * ui);
+    const max_w = app.width_px - 2 * gap;
+    // Line 1: "→ <target>" (the start cut when too long); line 2: the hint.
+    const t = app.theme;
+    var lbuf: [4200]u8 = undefined;
+    var target = h.targetPath();
+    const head = if (h.broken) "→ (missing) " else "→ ";
+    while (target.len > 1 and Gfx.textWidth(f, head) + Gfx.textWidth(f, "…") + Gfx.textWidth(f, target) + 2 * pad > max_w) {
+        target = target[1..];
+        while (target.len > 1 and (target[0] & 0xC0) == 0x80) target = target[1..];
+    }
+    const cut = target.len < h.target_len;
+    const line1 = std.fmt.bufPrint(&lbuf, "{s}{s}{s}", .{ head, if (cut) "…" else "", target }) catch return;
+    var sbuf: [128]u8 = undefined;
+    var nbuf: [4096]u8 = undefined;
+    const dir_name = std.fs.path.basename(h.cdDir());
+    const busy = !w.atPrompt();
+    const line2 = if (busy)
+        "the shell is busy: cd when it waits at its prompt"
+    else
+        std.fmt.bufPrint(&sbuf, "click: cd to {s}", .{Menu.oneLine(&nbuf, if (dir_name.len > 0) dir_name else "/", 40)}) catch "click: cd there";
+    const bw = @min(@max(Gfx.textWidth(f, line1), Gfx.textWidth(small, line2)) + 2 * pad, max_w);
+    const bh = f.cell_h + small.cell_h + pad * 1.5;
+    var above = true;
+    var by = name_r.y - arrow - bh;
+    if (by < gap) {
+        above = false;
+        by = name_r.y + name_r.h + arrow;
+    }
+    by = @min(by, app.height_px - bh - gap);
+    const bx = @max(@min(name_r.x, app.width_px - bw - gap), gap);
+    const box: Rect = .{ .x = bx, .y = by, .w = bw, .h = bh };
+    const border = if (h.folder) t.focus.mix(t.link, 0.35) else t.fg.mix(t.link, 0.35);
+    app.gfx.fill(box, t.prompt_bg);
+    app.gfx.outline(box, border, @max(@round(1.5 * ui), 1));
+    // The arrow: a small triangle from the box to the name.
+    const ax = @max(@min(name_r.x + @min(name_r.w / 2, @round(12 * ui)), bx + bw - arrow * 2), bx + arrow);
+    var k: f32 = 0;
+    while (k < arrow) : (k += 1) {
+        const half = arrow - k;
+        const ly = if (above) by + bh + k else by - k - 1;
+        app.gfx.fill(.{ .x = ax - half, .y = ly, .w = half * 2, .h = 1 }, border);
+    }
+    const target_col = if (h.broken) t.stderr_accent else if (h.folder) t.focus.mix(t.link, 0.35) else t.fg.mix(t.link, 0.35);
+    app.gfx.clip(box);
+    defer app.gfx.clip(null);
+    const x1 = app.gfx.text(f, bx + pad, by + pad / 2, head, t.prompt_fg);
+    _ = app.gfx.text(f, x1, by + pad / 2, line1[head.len..], target_col);
+    _ = app.gfx.text(small, bx + pad, by + pad / 2 + f.cell_h + pad / 2, line2, if (busy) t.stderr_accent else t.dim);
+    h.box = box;
+}
+
 fn onMouseLeave(app: *App) void {
     app.mouse = null;
+    app.hideLinkHover();
     app.sendLeave();
     app.hideTip();
     app.chip_hover = null;
@@ -4225,6 +5583,7 @@ fn onMouseLeave(app: *App) void {
 }
 
 fn onWheel(app: *App, x: f32, y: f32, dy: f32) void {
+    if (app.modal != null) return;
     app.closeMenu();
     if (app.peek) |*pk| if (pk.contains(x, y)) {
         pk.wheel(dy);
@@ -4420,6 +5779,8 @@ fn render(app: *App) void {
     const help = app.helpLine(&help_buf);
     StatusBar.draw(&app.gfx, app.statusFace(), app.prompt.status_r, help, t.dim, app.msg_buf[0..app.msg_len], app.msg_color);
     if (app.maximizedShown()) |m| if (app.jobs.items[m].anim_from == null) app.jobs.items[m].draw(&app.gfx, t);
+    app.drawFileSel();
+    app.drawLinkHover();
     app.drawFetch();
     app.drawMoving();
     // The peek over everything but tooltips (not while its window moves).
@@ -4434,7 +5795,7 @@ fn render(app: *App) void {
                 .prompt => true,
                 .job => |uid| app.jobByUid(uid) != null,
             },
-            .folder_history => |uid| app.jobByUid(uid) != null,
+            .folder_history, .files => |uid| app.jobByUid(uid) != null,
             .open_with, .bar => true,
         };
         if (alive) {
@@ -4443,7 +5804,17 @@ fn render(app: *App) void {
         } else {
             app.menu = null;
             app.sub_menu = null;
+            app.freeMenuFiles();
         }
+    }
+    if (app.modal) |*m| {
+        // Over the window it is about, when that one is in the windows area.
+        var area = app.desktop_r;
+        if (app.modal_job.window()) |uid| if (app.jobByUid(uid)) |w| if (app.indexOfWindow(w)) |i| if (app.isShown(i)) {
+            area = w.rect;
+        };
+        const screen: Rect = .{ .x = 0, .y = 0, .w = app.width_px, .h = app.height_px };
+        m.draw(&app.gfx, t, f, app.statusFace(), screen, area, app.mouse, app.scale.ui, c.SDL_GetTicks());
     }
     if (app.about_visible) app.drawAbout(f);
     app.drawTip();
@@ -4498,7 +5869,7 @@ fn drawAbout(app: *App, f: *Gfx.Face) void {
     const Line = struct { text: []const u8, col: Rgb };
     const lines = [_]Line{
         .{ .text = "gtty " ++ @import("build_options").version, .col = t.focus },
-        .{ .text = "a terminal where every command gets its own window", .col = t.dim },
+        .{ .text = "True Graphic Virtual Terminal", .col = t.dim },
         .{ .text = "", .col = t.dim },
         .{ .text = copyright, .col = t.prompt_fg },
         .{ .text = license_line, .col = t.prompt_fg },
